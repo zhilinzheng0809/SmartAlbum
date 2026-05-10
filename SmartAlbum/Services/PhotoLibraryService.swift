@@ -76,6 +76,37 @@ final class PhotoLibraryService: ObservableObject {
         }
     }
 
+    // MARK: - 高清图（详情页使用）
+
+    /// 异步请求高清图片（供详情页展示）
+    /// 使用有限目标尺寸避免触发 iCloud 原图下载，兼容云端照片缺失场景
+    func requestFullImage(for asset: PHAsset) async -> UIImage? {
+        // 以设备屏幕尺寸 × 2 作为目标，确保 Retina 屏清晰同时避免请求原图
+        let scale = UIScreen.main.scale
+        let screenSize = UIScreen.main.bounds.size
+        let targetSize = CGSize(width: screenSize.width * scale, height: screenSize.height * scale)
+
+        return await withCheckedContinuation { continuation in
+            let options = PHImageRequestOptions()
+            options.deliveryMode = .highQualityFormat
+            options.resizeMode = .exact
+            options.isNetworkAccessAllowed = true
+            options.isSynchronous = false
+
+            var resumed = false
+            PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: targetSize,
+                contentMode: .aspectFit,
+                options: options
+            ) { image, _ in
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume(returning: image)
+            }
+        }
+    }
+
     // MARK: - 原图数据
 
     /// 异步请求原图 Data（供AI分析使用）

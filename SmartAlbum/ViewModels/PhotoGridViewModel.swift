@@ -70,7 +70,7 @@ final class PhotoGridViewModel: ObservableObject {
             allAssets = allAssets.filter { ids.contains($0.localIdentifier) }
         }
 
-        let targetSize = CGSize(width: 300, height: 300)
+        let targetSize = CGSize(width: 600, height: 600)
         var photoAssets: [PhotoAsset] = []
 
         for asset in allAssets {

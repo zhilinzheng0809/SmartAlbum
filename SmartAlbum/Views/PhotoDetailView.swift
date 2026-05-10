@@ -131,8 +131,7 @@ struct PhotoDetailView: View {
     // MARK: - Actions
 
     private func loadContent() async {
-        fullImage = await photoService.requestThumbnail(
-            for: photoAsset.asset, targetSize: CGSize(width: 800, height: 800))
+        fullImage = await photoService.requestFullImage(for: photoAsset.asset)
         currentRecord = photoStore.fetch(by: photoAsset.id)
     }
 
