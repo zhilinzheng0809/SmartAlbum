@@ -2,6 +2,8 @@
 #import "SAPhotoClassification.h"
 #import <UIKit/UIKit.h>
 
+static NSInteger const SAQwenHTTPMaximumConnectionsPerHost = 10;
+
 @implementation SAQwenAnalyzeItem
 
 /**
@@ -42,9 +44,9 @@
     if (self) {
         [self loadConfiguration];
         NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
+        configuration.HTTPMaximumConnectionsPerHost = SAQwenHTTPMaximumConnectionsPerHost;
         configuration.timeoutIntervalForRequest = 120;
         configuration.timeoutIntervalForResource = 180;
-        configuration.HTTPMaximumConnectionsPerHost = 10;
         _session = [NSURLSession sessionWithConfiguration:configuration];
     }
     return self;
@@ -184,14 +186,12 @@
     }];
 
     for (SAQwenAnalyzeItem *item in items) {
-        @autoreleasepool {
-            [userContent addObject:@{
-                @"type": @"image_url",
-                @"image_url": @{
-                    @"url": [self dataURLStringForImageData:item.imageData]
-                }
-            }];
-        }
+        [userContent addObject:@{
+            @"type": @"image_url",
+            @"image_url": @{
+                @"url": [self dataURLStringForImageData:item.imageData]
+            }
+        }];
     }
 
     return @{

@@ -18,6 +18,8 @@ static NSString * const SAAutoAnalysisPromptHandledDefaultsKey = @"SAAutoAnalysi
 static NSString * const SAAutoAnalysisEnabledDefaultsKey = @"SAAutoAnalysisEnabledDefaultsKey";
 static NSInteger const SAAutoAnalysisBatchSize = 10;
 static NSInteger const SAAutoAnalysisMaxConcurrentBatches = 10;
+static CGFloat const SAAutoAnalysisImageMaxPixel = 960.0;
+static CGFloat const SAAutoAnalysisJPEGQuality = 0.68;
 
 @interface SAAutoAnalysisManager () <PHPhotoLibraryChangeObserver>
 
@@ -27,7 +29,6 @@ static NSInteger const SAAutoAnalysisMaxConcurrentBatches = 10;
 @property (nonatomic, strong) PHFetchResult<PHAsset *> *allImageAssetsFetchResult;
 @property (nonatomic, strong) NSMutableOrderedSet<NSString *> *pendingAssetIdentifiers;
 @property (nonatomic, strong) NSMutableOrderedSet<NSString *> *processingAssetIdentifiers;
-@property (nonatomic, strong) NSMutableSet<NSString *> *failedAssetIdentifiers;
 @property (nonatomic, assign, readwrite) BOOL autoAnalysisEnabled;
 @property (nonatomic, assign, readwrite) BOOL isAnalyzing;
 @property (nonatomic, assign) NSInteger totalCount;
@@ -64,7 +65,6 @@ static NSInteger const SAAutoAnalysisMaxConcurrentBatches = 10;
     if (self) {
         _pendingAssetIdentifiers = [NSMutableOrderedSet orderedSet];
         _processingAssetIdentifiers = [NSMutableOrderedSet orderedSet];
-        _failedAssetIdentifiers = [NSMutableSet set];
         _autoAnalysisEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:SAAutoAnalysisEnabledDefaultsKey];
         _statusText = @"自动分析未开启。";
         [[NSNotificationCenter defaultCenter] addObserver:self
@@ -271,7 +271,6 @@ static NSInteger const SAAutoAnalysisMaxConcurrentBatches = 10;
     if (resetProgress) {
         [self.pendingAssetIdentifiers removeAllObjects];
         [self.processingAssetIdentifiers removeAllObjects];
-        [self.failedAssetIdentifiers removeAllObjects];
         self.completedCount = 0;
         self.failedCount = 0;
         self.totalCount = 0;
@@ -289,7 +288,6 @@ static NSInteger const SAAutoAnalysisMaxConcurrentBatches = 10;
         NSString *identifier = asset.localIdentifier ?: @"";
         if (identifier.length == 0 ||
             [self.tagStore hasClassificationForIdentifier:identifier] ||
-            [self.failedAssetIdentifiers containsObject:identifier] ||
             [self.pendingAssetIdentifiers containsObject:identifier] ||
             [self.processingAssetIdentifiers containsObject:identifier]) {
             continue;
@@ -416,32 +414,34 @@ static NSInteger const SAAutoAnalysisMaxConcurrentBatches = 10;
                                    completion:(void (^)(NSArray<SAQwenAnalyzeItem *> *items, NSArray<NSString *> *failedReadIdentifiers))completion {
     NSMutableArray<SAQwenAnalyzeItem *> *preparedItems = [NSMutableArray array];
     NSMutableArray<NSString *> *failedIdentifiers = [NSMutableArray array];
-    [self prepareAnalyzeItemsFromAssets:assets
-                                  index:0
-                          preparedItems:preparedItems
-                      failedIdentifiers:failedIdentifiers
-                             completion:completion];
+    [self requestOptimizedAnalyzeItemsForAssets:assets
+                                          index:0
+                                  preparedItems:preparedItems
+                              failedIdentifiers:failedIdentifiers
+                                     completion:completion];
 }
 
 /**
- * @brief 按顺序准备批次请求项，避免同一批里同时解码过多图片导致内存峰值过高。
- * @param assets 当前批次照片数组。
- * @param index 当前处理索引。
- * @param preparedItems 已准备好的请求项数组。
- * @param failedIdentifiers 读取失败标识数组。
- * @param completion 完成回调。
+ * @brief 按顺序逐张准备一批图片请求项，避免同时解码过多大图导致内存峰值过高。
+ * @param assets 待读取照片数组。
+ * @param index 当前处理下标。
+ * @param preparedItems 已准备好的请求项容器。
+ * @param failedIdentifiers 读取失败标识容器。
+ * @param completion 全部完成回调。
  */
-- (void)prepareAnalyzeItemsFromAssets:(NSArray<PHAsset *> *)assets
-                                index:(NSUInteger)index
-                        preparedItems:(NSMutableArray<SAQwenAnalyzeItem *> *)preparedItems
-                    failedIdentifiers:(NSMutableArray<NSString *> *)failedIdentifiers
-                           completion:(void (^)(NSArray<SAQwenAnalyzeItem *> *items, NSArray<NSString *> *failedReadIdentifiers))completion {
-    if (index >= assets.count) {
-        completion(preparedItems.copy, failedIdentifiers.copy);
+- (void)requestOptimizedAnalyzeItemsForAssets:(NSArray<PHAsset *> *)assets
+                                        index:(NSInteger)index
+                                preparedItems:(NSMutableArray<SAQwenAnalyzeItem *> *)preparedItems
+                            failedIdentifiers:(NSMutableArray<NSString *> *)failedIdentifiers
+                                   completion:(void (^)(NSArray<SAQwenAnalyzeItem *> *items, NSArray<NSString *> *failedReadIdentifiers))completion {
+    if (index >= (NSInteger)assets.count) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(preparedItems.copy, failedIdentifiers.copy);
+        });
         return;
     }
 
-    PHAsset *asset = assets[index];
+    PHAsset *asset = assets[(NSUInteger)index];
     __weak typeof(self) weakSelf = self;
     [self requestOptimizedImageDataForAsset:asset completion:^(NSData * _Nullable imageData) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
@@ -449,18 +449,20 @@ static NSInteger const SAAutoAnalysisMaxConcurrentBatches = 10;
             return;
         }
 
-        if (imageData.length > 0) {
-            SAQwenAnalyzeItem *item = [[SAQwenAnalyzeItem alloc] initWithImageData:imageData localIdentifier:asset.localIdentifier];
-            [preparedItems addObject:item];
-        } else {
-            [failedIdentifiers addObject:asset.localIdentifier ?: @""];
+        @autoreleasepool {
+            if (imageData.length > 0) {
+                SAQwenAnalyzeItem *item = [[SAQwenAnalyzeItem alloc] initWithImageData:imageData localIdentifier:asset.localIdentifier];
+                [preparedItems addObject:item];
+            } else {
+                [failedIdentifiers addObject:asset.localIdentifier ?: @""];
+            }
         }
 
-        [strongSelf prepareAnalyzeItemsFromAssets:assets
-                                            index:index + 1
-                                    preparedItems:preparedItems
-                                failedIdentifiers:failedIdentifiers
-                                       completion:completion];
+        [strongSelf requestOptimizedAnalyzeItemsForAssets:assets
+                                                    index:index + 1
+                                            preparedItems:preparedItems
+                                        failedIdentifiers:failedIdentifiers
+                                               completion:completion];
     }];
 }
 
@@ -472,7 +474,6 @@ static NSInteger const SAAutoAnalysisMaxConcurrentBatches = 10;
 - (void)handlePreparedBatchItems:(NSArray<SAQwenAnalyzeItem *> *)items
            failedReadIdentifiers:(NSArray<NSString *> *)failedReadIdentifiers {
     if (failedReadIdentifiers.count > 0) {
-        [self.failedAssetIdentifiers addObjectsFromArray:failedReadIdentifiers];
         [self.processingAssetIdentifiers removeObjectsInArray:failedReadIdentifiers];
         self.completedCount += failedReadIdentifiers.count;
         self.failedCount += failedReadIdentifiers.count;
@@ -560,10 +561,7 @@ static NSInteger const SAAutoAnalysisMaxConcurrentBatches = 10;
         [processedIdentifiers addObject:item.localIdentifier];
         SAPhotoClassification *classification = classifications[item.localIdentifier];
         if (classification != nil) {
-            [self.failedAssetIdentifiers removeObject:item.localIdentifier];
             [self.tagStore saveClassification:classification];
-        } else {
-            [self.failedAssetIdentifiers addObject:item.localIdentifier];
         }
     }
 
@@ -602,42 +600,23 @@ static NSInteger const SAAutoAnalysisMaxConcurrentBatches = 10;
     PHImageRequestOptions *options = [[PHImageRequestOptions alloc] init];
     options.networkAccessAllowed = YES;
     options.deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
-    options.resizeMode = PHImageRequestOptionsResizeModeExact;
     options.version = PHImageRequestOptionsVersionCurrent;
 
-    CGSize targetSize = [self analysisTargetSize];
-    [self.imageManager requestImageForAsset:asset
-                                 targetSize:targetSize
-                                contentMode:PHImageContentModeAspectFit
-                                    options:options
-                              resultHandler:^(UIImage * _Nullable result, NSDictionary * _Nullable info) {
-        if ([info[PHImageCancelledKey] boolValue]) {
+    [self.imageManager requestImageDataAndOrientationForAsset:asset
+                                                      options:options
+                                                resultHandler:^(NSData * _Nullable imageData, NSString * _Nullable dataUTI, CGImagePropertyOrientation orientation, NSDictionary * _Nullable info) {
+        if (imageData.length == 0) {
             completion(nil);
             return;
         }
-
-        if ([info[PHImageResultIsDegradedKey] boolValue]) {
-            return;
-        }
-
-        if (result == nil) {
-            completion(nil);
-            return;
-        }
-
-        @autoreleasepool {
-            NSData *compressedData = [self compressedJPEGDataFromImage:result maxPixel:1280];
-            completion(compressedData);
-        }
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            @autoreleasepool {
+                UIImage *image = [UIImage imageWithData:imageData];
+                NSData *compressedData = [self compressedJPEGDataFromImage:image maxPixel:SAAutoAnalysisImageMaxPixel];
+                completion(compressedData ?: imageData);
+            }
+        });
     }];
-}
-
-/**
- * @brief 返回分析阶段请求的目标图片尺寸，避免先加载原始大图再压缩。
- * @return 目标像素尺寸。
- */
-- (CGSize)analysisTargetSize {
-    return CGSizeMake(1280, 1280);
 }
 
 /**
@@ -654,7 +633,7 @@ static NSInteger const SAAutoAnalysisMaxConcurrentBatches = 10;
     CGSize size = image.size;
     CGFloat maxSide = MAX(size.width, size.height);
     if (maxSide <= maxPixel) {
-        return UIImageJPEGRepresentation(image, 0.75);
+        return UIImageJPEGRepresentation(image, SAAutoAnalysisJPEGQuality);
     }
 
     CGFloat scale = maxPixel / maxSide;
@@ -663,7 +642,7 @@ static NSInteger const SAAutoAnalysisMaxConcurrentBatches = 10;
     UIImage *resized = [renderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull rendererContext) {
         [image drawInRect:CGRectMake(0, 0, targetSize.width, targetSize.height)];
     }];
-    return UIImageJPEGRepresentation(resized, 0.72);
+    return UIImageJPEGRepresentation(resized, SAAutoAnalysisJPEGQuality);
 }
 
 /**
