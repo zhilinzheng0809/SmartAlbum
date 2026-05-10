@@ -3,12 +3,13 @@
 #import "SAPhotoDetailViewController.h"
 #import "SAPhotoGridCell.h"
 #import "SAQwenVLService.h"
+#import "SASpeechRecognizerService.h"
 #import "SATagStore.h"
 #import <Photos/Photos.h>
 
 static NSString * const SAAlbumPhotoGridCellIdentifier = @"SAAlbumPhotoGridCellIdentifier";
 
-@interface SAAlbumPhotosViewController () <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UISearchResultsUpdating>
+@interface SAAlbumPhotosViewController () <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UISearchResultsUpdating, UISearchBarDelegate>
 
 @property (nonatomic, strong) PHAssetCollection *albumCollection;
 @property (nonatomic, strong) PHCachingImageManager *imageManager;
@@ -19,12 +20,14 @@ static NSString * const SAAlbumPhotoGridCellIdentifier = @"SAAlbumPhotoGridCellI
 @property (nonatomic, strong) UIButton *analyzeUnlabeledButton;
 @property (nonatomic, strong) UIButton *analyzeAllButton;
 @property (nonatomic, strong) UICollectionView *collectionView;
+@property (nonatomic, strong) UISearchController *searchController;
 @property (nonatomic, strong) NSArray<PHAsset *> *allAssets;
 @property (nonatomic, strong) NSArray<PHAsset *> *filteredAssets;
 @property (nonatomic, copy) NSString *searchKeyword;
 @property (nonatomic, copy, nullable) NSString *currentAnalyzingIdentifier;
 @property (nonatomic, assign) BOOL isManagingPhotos;
 @property (nonatomic, strong) NSMutableOrderedSet<NSString *> *selectedAssetIdentifiers;
+@property (nonatomic, strong) SASpeechRecognizerService *speechService;
 @property (nonatomic, assign) BOOL isAnalyzing;
 @property (nonatomic, assign) NSInteger analyzeTotalCount;
 @property (nonatomic, assign) NSInteger analyzeCompletedCount;
@@ -59,6 +62,7 @@ static NSString * const SAAlbumPhotoGridCellIdentifier = @"SAAlbumPhotoGridCellI
         _filteredAssets = @[];
         _searchKeyword = @"";
         _selectedAssetIdentifiers = [NSMutableOrderedSet orderedSet];
+        _speechService = [[SASpeechRecognizerService alloc] initWithLocaleIdentifier:@"zh-CN"];
     }
     return self;
 }
@@ -75,6 +79,16 @@ static NSString * const SAAlbumPhotoGridCellIdentifier = @"SAAlbumPhotoGridCellI
 }
 
 /**
+ * @brief 页面离开时停止可能仍在进行的语音识别。
+ * @param animated 是否带动画。
+ */
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self.speechService stopRecognition];
+    [self updateSpeechSearchButtonAppearance];
+}
+
+/**
  * @brief 配置导航栏搜索能力。
  */
 - (void)setupNavigationBar {
@@ -84,13 +98,19 @@ static NSString * const SAAlbumPhotoGridCellIdentifier = @"SAAlbumPhotoGridCellI
                                                                              target:self
                                                                              action:@selector(toggleManageModeTapped)];
 
-    UISearchController *searchController = [[UISearchController alloc] initWithSearchResultsController:nil];
-    searchController.obscuresBackgroundDuringPresentation = NO;
-    searchController.searchResultsUpdater = self;
-    searchController.searchBar.placeholder = @"搜索当前相册中的标签或摘要";
-    self.navigationItem.searchController = searchController;
+    self.searchController = [[UISearchController alloc] initWithSearchResultsController:nil];
+    self.searchController.obscuresBackgroundDuringPresentation = NO;
+    self.searchController.searchResultsUpdater = self;
+    self.searchController.searchBar.placeholder = @"搜索当前相册中的标签或摘要";
+    self.searchController.searchBar.delegate = self;
+    self.searchController.searchBar.showsBookmarkButton = YES;
+    [self.searchController.searchBar setImage:[UIImage systemImageNamed:@"mic.fill"]
+                            forSearchBarIcon:UISearchBarIconBookmark
+                                       state:UIControlStateNormal];
+    self.navigationItem.searchController = self.searchController;
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
     self.definesPresentationContext = YES;
+    [self updateSpeechSearchButtonAppearance];
 }
 
 /**
@@ -277,6 +297,7 @@ static NSString * const SAAlbumPhotoGridCellIdentifier = @"SAAlbumPhotoGridCellI
                                                                                           style:UIBarButtonItemStylePlain
                                                                                          target:self
                                                                                          action:@selector(deleteSelectedPhotosTapped)] : nil;
+    self.navigationItem.leftBarButtonItem.tintColor = managing ? [UIColor systemRedColor] : nil;
     self.navigationItem.leftBarButtonItem.enabled = NO;
     self.analyzeUnlabeledButton.hidden = managing;
     self.analyzeAllButton.hidden = managing;
@@ -771,7 +792,60 @@ static NSString * const SAAlbumPhotoGridCellIdentifier = @"SAAlbumPhotoGridCellI
     [self applyFilter];
 }
 
+#pragma mark - UISearchBarDelegate
+
+/**
+ * @brief 点击搜索框麦克风按钮后切换语音识别状态。
+ * @param searchBar 当前搜索栏。
+ */
+- (void)searchBarBookmarkButtonClicked:(UISearchBar *)searchBar {
+    __weak typeof(self) weakSelf = self;
+    [self.speechService toggleRecognitionWithResultHandler:^(NSString *recognizedText) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        strongSelf.searchController.active = YES;
+        strongSelf.searchController.searchBar.text = recognizedText;
+        strongSelf.searchKeyword = recognizedText;
+        [strongSelf applyFilter];
+    } stateHandler:^(BOOL isRecognizing) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        [strongSelf updateSpeechSearchButtonAppearance];
+        if (isRecognizing) {
+            [strongSelf updateStatusWithText:@"正在语音识别，请直接说出搜索内容。"];
+        } else if (strongSelf.isManagingPhotos) {
+            [strongSelf updateStatusWithText:@"已退出语音识别，可继续管理当前相册照片。"];
+        } else {
+            [strongSelf applyFilter];
+        }
+    } errorHandler:^(NSString *message) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        [strongSelf updateSpeechSearchButtonAppearance];
+        [strongSelf showAlertWithTitle:@"语音搜索不可用" message:message];
+    }];
+}
+
 #pragma mark - Helper
+
+/**
+ * @brief 更新搜索栏麦克风按钮的图标状态。
+ */
+- (void)updateSpeechSearchButtonAppearance {
+    NSString *iconName = self.speechService.isRecognizing ? @"stop.circle.fill" : @"mic.fill";
+    [self.searchController.searchBar setImage:[UIImage systemImageNamed:iconName]
+                            forSearchBarIcon:UISearchBarIconBookmark
+                                       state:UIControlStateNormal];
+}
 
 /**
  * @brief 生成宫格缩略图目标尺寸。

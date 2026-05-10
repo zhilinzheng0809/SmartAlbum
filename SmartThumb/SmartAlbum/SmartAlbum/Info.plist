@@ -4,6 +4,10 @@
 <dict>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>SmartAlbum 需要访问相册以完成智能分类与标签生成。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SmartAlbum 需要访问麦克风，以便通过语音输入搜索照片。</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>SmartAlbum 需要使用语音识别能力，将你的语音转换为搜索关键字。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

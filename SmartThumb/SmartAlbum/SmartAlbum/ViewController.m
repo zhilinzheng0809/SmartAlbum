@@ -7,31 +7,41 @@
 
 #import "ViewController.h"
 #import "SAAlbumItem.h"
+#import "SAAutoAnalysisManager.h"
 #import "SAAlbumListCell.h"
 #import "SAAlbumPhotosViewController.h"
 #import "SAPhotoClassification.h"
 #import "SAPhotoDetailViewController.h"
 #import "SAPhotoGridCell.h"
 #import "SAQwenVLService.h"
+#import "SASpeechRecognizerService.h"
 #import "SATagStore.h"
 #import <Photos/Photos.h>
 
 static NSString * const SAAlbumListCellIdentifier = @"SAAlbumListCellIdentifier";
 static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCellIdentifier";
 
-@interface ViewController () <UITableViewDataSource, UITableViewDelegate, UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UISearchResultsUpdating>
+@interface ViewController () <UITableViewDataSource, UITableViewDelegate, UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UISearchResultsUpdating, UISearchBarDelegate>
 
 @property (nonatomic, strong) UILabel *statusLabel;
+@property (nonatomic, strong) UIView *autoAnalysisCardView;
+@property (nonatomic, strong) UILabel *autoAnalysisTitleLabel;
+@property (nonatomic, strong) UILabel *autoAnalysisDetailLabel;
+@property (nonatomic, strong) UIProgressView *autoAnalysisProgressView;
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UICollectionView *collectionView;
+@property (nonatomic, strong) UISearchController *searchController;
 @property (nonatomic, strong) PHCachingImageManager *imageManager;
 @property (nonatomic, strong) SATagStore *tagStore;
 @property (nonatomic, strong) SAQwenVLService *qwenService;
+@property (nonatomic, strong) SASpeechRecognizerService *speechService;
 @property (nonatomic, strong) NSArray<SAAlbumItem *> *allAlbums;
 @property (nonatomic, strong) NSArray<SAAlbumItem *> *filteredAlbums;
 @property (nonatomic, strong) NSArray<PHAsset *> *allPhotoAssets;
 @property (nonatomic, strong) NSArray<PHAsset *> *searchResultAssets;
 @property (nonatomic, copy) NSString *searchKeyword;
+@property (nonatomic, assign) BOOL hasPresentedAutoAnalysisPrompt;
+@property (nonatomic, assign) BOOL autoAnalysisWasRunning;
 
 @end
 
@@ -46,14 +56,19 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
     self.imageManager = [[PHCachingImageManager alloc] init];
     self.tagStore = [[SATagStore alloc] init];
     self.qwenService = [[SAQwenVLService alloc] init];
+    self.speechService = [[SASpeechRecognizerService alloc] initWithLocaleIdentifier:@"zh-CN"];
     self.allAlbums = @[];
     self.filteredAlbums = @[];
     self.allPhotoAssets = @[];
     self.searchResultAssets = @[];
     self.searchKeyword = @"";
+    self.hasPresentedAutoAnalysisPrompt = NO;
+    self.autoAnalysisWasRunning = NO;
 
     [self setupNavigationBar];
     [self setupViews];
+    [self registerForAutoAnalysisNotifications];
+    [self configureAutoAnalysisManager];
     [self requestPhotoAccessAndLoadAlbums];
 }
 
@@ -68,18 +83,41 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
 }
 
 /**
+ * @brief 页面离开时停止可能仍在进行的语音识别。
+ * @param animated 是否带动画。
+ */
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self.speechService stopRecognition];
+    [self updateSpeechSearchButtonAppearance];
+}
+
+/**
+ * @brief 控制器销毁前移除自动分析通知监听。
+ */
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+/**
  * @brief 配置导航栏搜索能力。
  */
 - (void)setupNavigationBar {
     self.title = @"智能相册";
 
-    UISearchController *searchController = [[UISearchController alloc] initWithSearchResultsController:nil];
-    searchController.obscuresBackgroundDuringPresentation = NO;
-    searchController.searchResultsUpdater = self;
-    searchController.searchBar.placeholder = @"搜索所有照片的标签或摘要";
-    self.navigationItem.searchController = searchController;
+    self.searchController = [[UISearchController alloc] initWithSearchResultsController:nil];
+    self.searchController.obscuresBackgroundDuringPresentation = NO;
+    self.searchController.searchResultsUpdater = self;
+    self.searchController.searchBar.placeholder = @"搜索所有照片的标签或摘要";
+    self.searchController.searchBar.delegate = self;
+    self.searchController.searchBar.showsBookmarkButton = YES;
+    [self.searchController.searchBar setImage:[UIImage systemImageNamed:@"mic.fill"]
+                            forSearchBarIcon:UISearchBarIconBookmark
+                                       state:UIControlStateNormal];
+    self.navigationItem.searchController = self.searchController;
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
     self.definesPresentationContext = YES;
+    [self updateSpeechSearchButtonAppearance];
 }
 
 /**
@@ -92,6 +130,29 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
     self.statusLabel.font = [UIFont systemFontOfSize:13];
     self.statusLabel.textColor = [UIColor secondaryLabelColor];
     self.statusLabel.text = @"正在读取系统相册...";
+
+    self.autoAnalysisCardView = [[UIView alloc] init];
+    self.autoAnalysisCardView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.autoAnalysisCardView.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    self.autoAnalysisCardView.layer.cornerRadius = 14.0;
+    self.autoAnalysisCardView.hidden = YES;
+
+    self.autoAnalysisTitleLabel = [[UILabel alloc] init];
+    self.autoAnalysisTitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.autoAnalysisTitleLabel.font = [UIFont boldSystemFontOfSize:15];
+    self.autoAnalysisTitleLabel.textColor = [UIColor labelColor];
+    self.autoAnalysisTitleLabel.text = @"自动分析";
+
+    self.autoAnalysisDetailLabel = [[UILabel alloc] init];
+    self.autoAnalysisDetailLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.autoAnalysisDetailLabel.numberOfLines = 0;
+    self.autoAnalysisDetailLabel.font = [UIFont systemFontOfSize:13];
+    self.autoAnalysisDetailLabel.textColor = [UIColor secondaryLabelColor];
+
+    self.autoAnalysisProgressView = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    self.autoAnalysisProgressView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.autoAnalysisProgressView.progressTintColor = [UIColor systemBlueColor];
+    self.autoAnalysisProgressView.trackTintColor = [UIColor systemGray5Color];
 
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -114,20 +175,41 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
     [self.collectionView registerClass:[SAPhotoGridCell class] forCellWithReuseIdentifier:SAHomeSearchPhotoCellIdentifier];
 
     [self.view addSubview:self.statusLabel];
+    [self.view addSubview:self.autoAnalysisCardView];
     [self.view addSubview:self.tableView];
     [self.view addSubview:self.collectionView];
+    [self.autoAnalysisCardView addSubview:self.autoAnalysisTitleLabel];
+    [self.autoAnalysisCardView addSubview:self.autoAnalysisDetailLabel];
+    [self.autoAnalysisCardView addSubview:self.autoAnalysisProgressView];
 
     [NSLayoutConstraint activateConstraints:@[
         [self.statusLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:12],
         [self.statusLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [self.statusLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
 
-        [self.tableView.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:8],
+        [self.autoAnalysisCardView.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:10],
+        [self.autoAnalysisCardView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [self.autoAnalysisCardView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+
+        [self.autoAnalysisTitleLabel.topAnchor constraintEqualToAnchor:self.autoAnalysisCardView.topAnchor constant:12],
+        [self.autoAnalysisTitleLabel.leadingAnchor constraintEqualToAnchor:self.autoAnalysisCardView.leadingAnchor constant:12],
+        [self.autoAnalysisTitleLabel.trailingAnchor constraintEqualToAnchor:self.autoAnalysisCardView.trailingAnchor constant:-12],
+
+        [self.autoAnalysisDetailLabel.topAnchor constraintEqualToAnchor:self.autoAnalysisTitleLabel.bottomAnchor constant:6],
+        [self.autoAnalysisDetailLabel.leadingAnchor constraintEqualToAnchor:self.autoAnalysisCardView.leadingAnchor constant:12],
+        [self.autoAnalysisDetailLabel.trailingAnchor constraintEqualToAnchor:self.autoAnalysisCardView.trailingAnchor constant:-12],
+
+        [self.autoAnalysisProgressView.topAnchor constraintEqualToAnchor:self.autoAnalysisDetailLabel.bottomAnchor constant:10],
+        [self.autoAnalysisProgressView.leadingAnchor constraintEqualToAnchor:self.autoAnalysisCardView.leadingAnchor constant:12],
+        [self.autoAnalysisProgressView.trailingAnchor constraintEqualToAnchor:self.autoAnalysisCardView.trailingAnchor constant:-12],
+        [self.autoAnalysisProgressView.bottomAnchor constraintEqualToAnchor:self.autoAnalysisCardView.bottomAnchor constant:-12],
+
+        [self.tableView.topAnchor constraintEqualToAnchor:self.autoAnalysisCardView.bottomAnchor constant:8],
         [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
 
-        [self.collectionView.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:8],
+        [self.collectionView.topAnchor constraintEqualToAnchor:self.autoAnalysisCardView.bottomAnchor constant:8],
         [self.collectionView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [self.collectionView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
         [self.collectionView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]
@@ -171,6 +253,7 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
  * @brief 读取系统相册并生成首页列表数据。
  */
 - (void)loadAlbums {
+    [self configureAutoAnalysisManager];
     NSMutableArray<SAAlbumItem *> *albums = [NSMutableArray array];
     [albums addObjectsFromArray:[self albumItemsFromFetchResult:[PHAssetCollection fetchAssetCollectionsWithType:PHAssetCollectionTypeSmartAlbum subtype:PHAssetCollectionSubtypeAny options:nil]]];
     [albums addObjectsFromArray:[self albumItemsFromFetchResult:[PHCollectionList fetchTopLevelUserCollectionsWithOptions:nil]]];
@@ -179,16 +262,18 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
     self.allPhotoAssets = [self loadAllPhotoAssets];
     [self applyFilter];
     self.statusLabel.text = [NSString stringWithFormat:@"已加载 %lu 个相册。进入相册后可对其中照片进行 AI 分析。", (unsigned long)self.allAlbums.count];
+    [self presentAutoAnalysisPromptIfNeeded];
+    [self syncAutoAnalysisProgressUI];
 }
 
 /**
- * @brief 读取系统图库中的全部照片，供首页全局搜索使用。
- * @return 全部照片数组。
+ * @brief 读取系统图库中的全部资源，供首页全局搜索使用。
+ * @return 全部资源数组。
  */
 - (NSArray<PHAsset *> *)loadAllPhotoAssets {
     PHFetchOptions *options = [[PHFetchOptions alloc] init];
     options.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"creationDate" ascending:NO]];
-    PHFetchResult<PHAsset *> *result = [PHAsset fetchAssetsWithMediaType:PHAssetMediaTypeImage options:options];
+    PHFetchResult<PHAsset *> *result = [PHAsset fetchAssetsWithOptions:options];
     NSMutableArray<PHAsset *> *assets = [NSMutableArray array];
     [result enumerateObjectsUsingBlock:^(PHAsset * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
         [assets addObject:obj];
@@ -267,6 +352,113 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
         [self.collectionView reloadData];
         self.title = [NSString stringWithFormat:@"搜索结果（%lu）", (unsigned long)self.searchResultAssets.count];
         self.statusLabel.text = [NSString stringWithFormat:@"已搜索全部照片，命中 %lu 张。", (unsigned long)self.searchResultAssets.count];
+    }
+}
+
+/**
+ * @brief 注册自动分析进度通知。
+ */
+- (void)registerForAutoAnalysisNotifications {
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleAutoAnalysisProgressChanged:)
+                                                 name:SAAutoAnalysisProgressDidChangeNotification
+                                               object:nil];
+}
+
+/**
+ * @brief 配置自动分析管理器，供首次提醒和后台任务使用。
+ */
+- (void)configureAutoAnalysisManager {
+    [[SAAutoAnalysisManager sharedManager] configureWithImageManager:self.imageManager
+                                                           tagStore:self.tagStore
+                                                        qwenService:self.qwenService];
+}
+
+/**
+ * @brief 在首次进入应用时提醒用户是否开启后台自动分析。
+ */
+- (void)presentAutoAnalysisPromptIfNeeded {
+    SAAutoAnalysisManager *manager = [SAAutoAnalysisManager sharedManager];
+    if (self.hasPresentedAutoAnalysisPrompt || ![manager shouldPresentAutoAnalysisPrompt] || self.presentedViewController != nil) {
+        return;
+    }
+
+    self.hasPresentedAutoAnalysisPrompt = YES;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"开启自动分析"
+                                                                   message:@"是否现在开始对相册中的照片进行后台自动分析？分析会串行进行，不影响你继续浏览、搜索和管理照片，后续新增照片也会自动分析。该过程会调用 qwen-vl-max，可能产生接口费用。"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"暂不启用" style:UIAlertActionStyleCancel handler:^(UIAlertAction * _Nonnull action) {
+        [[SAAutoAnalysisManager sharedManager] markAutoAnalysisPromptHandled];
+        [self syncAutoAnalysisProgressUI];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"立即开启" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        [[SAAutoAnalysisManager sharedManager] enableAutoAnalysisAndStart];
+        [self syncAutoAnalysisProgressUI];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+/**
+ * @brief 响应自动分析进度变化，刷新首页卡片和必要的数据展示。
+ * @param notification 自动分析进度通知。
+ */
+- (void)handleAutoAnalysisProgressChanged:(NSNotification *)notification {
+    NSDictionary<NSString *, id> *info = notification.userInfo ?: @{};
+    [self updateAutoAnalysisProgressUIWithInfo:info];
+
+    NSNumber *completedNumber = info[SAAutoAnalysisCompletedCountKey];
+    if (self.searchKeyword.length > 0 && completedNumber.integerValue > 0) {
+        [self applyFilter];
+    }
+
+    NSNumber *isRunningNumber = info[SAAutoAnalysisIsRunningKey];
+    if (self.autoAnalysisWasRunning && !isRunningNumber.boolValue && self.allAlbums.count > 0) {
+        [self loadAlbums];
+    }
+    self.autoAnalysisWasRunning = isRunningNumber.boolValue;
+}
+
+/**
+ * @brief 根据管理器快照刷新首页自动分析卡片。
+ */
+- (void)syncAutoAnalysisProgressUI {
+    NSDictionary<NSString *, id> *info = [[SAAutoAnalysisManager sharedManager] progressSnapshot];
+    [self updateAutoAnalysisProgressUIWithInfo:info];
+    self.autoAnalysisWasRunning = [info[SAAutoAnalysisIsRunningKey] boolValue];
+}
+
+/**
+ * @brief 将自动分析状态映射到首页进度卡片。
+ * @param info 自动分析状态字典。
+ */
+- (void)updateAutoAnalysisProgressUIWithInfo:(NSDictionary<NSString *, id> *)info {
+    BOOL isEnabled = [info[SAAutoAnalysisEnabledKey] boolValue];
+    BOOL isRunning = [info[SAAutoAnalysisIsRunningKey] boolValue];
+    NSInteger totalCount = [info[SAAutoAnalysisTotalCountKey] integerValue];
+    NSInteger completedCount = [info[SAAutoAnalysisCompletedCountKey] integerValue];
+    NSInteger failedCount = [info[SAAutoAnalysisFailedCountKey] integerValue];
+    NSInteger pendingCount = [info[SAAutoAnalysisPendingCountKey] integerValue];
+    NSString *statusText = [info[SAAutoAnalysisStatusTextKey] isKindOfClass:[NSString class]] ? info[SAAutoAnalysisStatusTextKey] : @"";
+
+    self.autoAnalysisCardView.hidden = !(isEnabled || isRunning);
+    if (self.autoAnalysisCardView.hidden) {
+        return;
+    }
+
+    self.autoAnalysisTitleLabel.text = isRunning ? @"后台自动分析中" : @"自动分析已开启";
+    if (totalCount > 0) {
+        self.autoAnalysisDetailLabel.text = [NSString stringWithFormat:@"%@\n进度：%ld / %ld，待处理 %ld，失败 %ld。",
+                                             statusText.length > 0 ? statusText : @"后台自动分析正在进行。",
+                                             (long)completedCount,
+                                             (long)totalCount,
+                                             (long)pendingCount,
+                                             (long)failedCount];
+        self.autoAnalysisProgressView.hidden = NO;
+        self.autoAnalysisProgressView.progress = MIN(1.0, MAX(0.0, (float)completedCount / (float)MAX(totalCount, 1)));
+    } else {
+        self.autoAnalysisDetailLabel.text = statusText.length > 0 ? statusText : @"新增照片会在后台自动分析。";
+        self.autoAnalysisProgressView.hidden = !isRunning;
+        self.autoAnalysisProgressView.progress = 0.0f;
     }
 }
 
@@ -454,6 +646,68 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController {
     self.searchKeyword = searchController.searchBar.text ?: @"";
     [self applyFilter];
+}
+
+/**
+ * @brief 点击搜索框麦克风按钮后切换语音识别状态。
+ * @param searchBar 当前搜索栏。
+ */
+- (void)searchBarBookmarkButtonClicked:(UISearchBar *)searchBar {
+    __weak typeof(self) weakSelf = self;
+    [self.speechService toggleRecognitionWithResultHandler:^(NSString *recognizedText) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        strongSelf.searchController.active = YES;
+        strongSelf.searchController.searchBar.text = recognizedText;
+        strongSelf.searchKeyword = recognizedText;
+        [strongSelf applyFilter];
+    } stateHandler:^(BOOL isRecognizing) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        [strongSelf updateSpeechSearchButtonAppearance];
+        if (isRecognizing) {
+            strongSelf.statusLabel.text = @"正在语音识别，请直接说出搜索内容。";
+        } else {
+            [strongSelf applyFilter];
+        }
+    } errorHandler:^(NSString *message) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        [strongSelf updateSpeechSearchButtonAppearance];
+        [strongSelf showAlertWithTitle:@"语音搜索不可用" message:message];
+    }];
+}
+
+/**
+ * @brief 更新搜索栏麦克风按钮的图标状态。
+ */
+- (void)updateSpeechSearchButtonAppearance {
+    NSString *iconName = self.speechService.isRecognizing ? @"stop.circle.fill" : @"mic.fill";
+    [self.searchController.searchBar setImage:[UIImage systemImageNamed:iconName]
+                            forSearchBarIcon:UISearchBarIconBookmark
+                                       state:UIControlStateNormal];
+}
+
+/**
+ * @brief 展示通用提示弹窗。
+ * @param title 标题文案。
+ * @param message 内容文案。
+ */
+- (void)showAlertWithTitle:(NSString *)title message:(NSString *)message {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 /**
