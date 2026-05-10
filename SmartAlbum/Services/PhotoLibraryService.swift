@@ -51,7 +51,7 @@ final class PhotoLibraryService: ObservableObject {
 
     // MARK: - 缩略图
 
-    /// 异步请求缩略图
+    /// 异步请求缩略图，跳过低质量版本确保清晰
     func requestThumbnail(
         for asset: PHAsset,
         targetSize: CGSize
@@ -59,6 +59,7 @@ final class PhotoLibraryService: ObservableObject {
         await withCheckedContinuation { continuation in
             let options = PHImageRequestOptions()
             options.deliveryMode = .opportunistic
+            options.resizeMode = .fast
             options.isNetworkAccessAllowed = true
             options.isSynchronous = false
 
@@ -68,8 +69,10 @@ final class PhotoLibraryService: ObservableObject {
                 targetSize: targetSize,
                 contentMode: .aspectFill,
                 options: options
-            ) { image, _ in
+            ) { image, info in
                 guard !resumed else { return }
+                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                guard !isDegraded else { return }
                 resumed = true
                 continuation.resume(returning: image)
             }
@@ -79,9 +82,8 @@ final class PhotoLibraryService: ObservableObject {
     // MARK: - 高清图（详情页使用）
 
     /// 异步请求高清图片（供详情页展示）
-    /// 使用有限目标尺寸避免触发 iCloud 原图下载，兼容云端照片缺失场景
+    /// 直接请求高质量版本，配合已有的缩略图占位实现秒开体验
     func requestFullImage(for asset: PHAsset) async -> UIImage? {
-        // 以设备屏幕尺寸 × 2 作为目标，确保 Retina 屏清晰同时避免请求原图
         let scale = UIScreen.main.scale
         let screenSize = UIScreen.main.bounds.size
         let targetSize = CGSize(width: screenSize.width * scale, height: screenSize.height * scale)
@@ -89,7 +91,7 @@ final class PhotoLibraryService: ObservableObject {
         return await withCheckedContinuation { continuation in
             let options = PHImageRequestOptions()
             options.deliveryMode = .highQualityFormat
-            options.resizeMode = .exact
+            options.resizeMode = .fast
             options.isNetworkAccessAllowed = true
             options.isSynchronous = false
 

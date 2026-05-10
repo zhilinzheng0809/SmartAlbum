@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xcodebuild -project SmartAlbum.xcodeproj -scheme SmartAlbum -destination 'platform=iOS Simulator,name=iPhone 16' build)",
+      "Bash(xcodebuild -project SmartAlbum.xcodeproj -scheme SmartAlbum -destination 'platform=iOS Simulator,name=iPhone 16,arch=arm64' build)",
+      "Bash(xcrun simctl *)",
+      "Bash(xcodebuild -project SmartAlbum.xcodeproj -scheme SmartAlbum -destination 'platform=iOS Simulator,id=3E929E9D-4BDE-4ECB-91E0-9A35C3F9EFC3' build)"
+    ]
+  }
+}

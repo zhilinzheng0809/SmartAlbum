@@ -50,7 +50,11 @@ final class PhotoGridViewModel: ObservableObject {
               photoService.authorizationStatus == .limited
         else { return }
 
-        isLoading = true
+        // 已有缓存数据时避免全屏 loading 遮挡网格
+        let hasCachedAssets = !assets.isEmpty
+        if !hasCachedAssets {
+            isLoading = true
+        }
         defer { isLoading = false }
 
         var allAssets = photoService.fetchAllAssets()
@@ -70,7 +74,7 @@ final class PhotoGridViewModel: ObservableObject {
             allAssets = allAssets.filter { ids.contains($0.localIdentifier) }
         }
 
-        let targetSize = CGSize(width: 600, height: 600)
+        let targetSize = CGSize(width: 400, height: 400)
         var photoAssets: [PhotoAsset] = []
 
         for asset in allAssets {

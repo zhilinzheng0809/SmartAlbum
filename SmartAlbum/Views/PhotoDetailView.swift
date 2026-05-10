@@ -16,17 +16,19 @@ struct PhotoDetailView: View {
     @State private var errorMessage: String?
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                imageSection
+        VStack(spacing: 0) {
+            imageSection
 
-                if let record = currentRecord, record.isAnalyzed {
-                    analysisResultCard(record)
-                } else {
-                    analysisPlaceholder
+            ScrollView {
+                VStack(spacing: 16) {
+                    if let record = currentRecord, record.isAnalyzed {
+                        analysisResultCard(record)
+                    } else {
+                        analysisPlaceholder
+                    }
                 }
+                .padding(.vertical)
             }
-            .padding(.vertical)
         }
         .navigationTitle("照片详情")
         .navigationBarTitleDisplayMode(.inline)
@@ -45,6 +47,15 @@ struct PhotoDetailView: View {
                     .frame(maxWidth: .infinity)
                     .cornerRadius(12)
                     .padding(.horizontal)
+                    .drawingGroup()
+            } else if let thumbnail = photoAsset.thumbnail {
+                Image(uiImage: thumbnail)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity)
+                    .cornerRadius(12)
+                    .padding(.horizontal)
+                    .overlay(ProgressView())
             } else {
                 Rectangle()
                     .fill(Color(.systemGray6))

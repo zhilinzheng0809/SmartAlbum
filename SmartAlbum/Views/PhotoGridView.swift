@@ -100,7 +100,7 @@ struct PhotoGridView: View {
 
     @ViewBuilder
     private var contentArea: some View {
-        if viewModel.isLoading {
+        if viewModel.isLoading && viewModel.assets.isEmpty {
             Spacer()
             ProgressView("加载中...")
             Spacer()
