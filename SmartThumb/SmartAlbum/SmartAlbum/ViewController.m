@@ -673,8 +673,8 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
         [strongSelf updateSpeechSearchButtonAppearance];
         if (isRecognizing) {
             strongSelf.statusLabel.text = @"正在语音识别，请直接说出搜索内容。";
-        } else {
-            [strongSelf applyFilter];
+        } else if (strongSelf.searchController.isActive) {
+            strongSelf.statusLabel.text = @"已停止语音识别，可继续编辑搜索内容。";
         }
     } errorHandler:^(NSString *message) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
@@ -685,6 +685,18 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
         [strongSelf updateSpeechSearchButtonAppearance];
         [strongSelf showAlertWithTitle:@"语音搜索不可用" message:message];
     }];
+}
+
+/**
+ * @brief 点击搜索框关闭按钮时结束语音识别并恢复首页相册列表。
+ * @param searchBar 当前搜索栏。
+ */
+- (void)searchBarCancelButtonClicked:(UISearchBar *)searchBar {
+    [self.speechService stopRecognition];
+    [self updateSpeechSearchButtonAppearance];
+    self.searchKeyword = @"";
+    searchBar.text = @"";
+    [self applyFilter];
 }
 
 /**

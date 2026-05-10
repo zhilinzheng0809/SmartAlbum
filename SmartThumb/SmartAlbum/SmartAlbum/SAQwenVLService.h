@@ -5,6 +5,23 @@
 NS_ASSUME_NONNULL_BEGIN
 
 typedef void(^SAQwenAnalyzeCompletion)(SAPhotoClassification * _Nullable classification, NSError * _Nullable error);
+typedef void(^SAQwenBatchAnalyzeCompletion)(NSDictionary<NSString *, SAPhotoClassification *> *classifications, NSArray<NSString *> *failedIdentifiers, NSError * _Nullable error);
+
+@interface SAQwenAnalyzeItem : NSObject
+
+@property (nonatomic, copy, readonly) NSString *localIdentifier;
+@property (nonatomic, copy, readonly) NSData *imageData;
+
+/**
+ * @brief 使用图片数据和资源标识初始化一条批量分析请求项。
+ * @param imageData JPEG 图片数据。
+ * @param localIdentifier 相册资源唯一标识。
+ * @return 请求项对象。
+ */
+- (instancetype)initWithImageData:(NSData *)imageData
+                  localIdentifier:(NSString *)localIdentifier;
+
+@end
 
 @interface SAQwenVLService : NSObject
 
@@ -29,6 +46,14 @@ typedef void(^SAQwenAnalyzeCompletion)(SAPhotoClassification * _Nullable classif
 - (void)analyzeImageData:(NSData *)imageData
          localIdentifier:(NSString *)localIdentifier
               completion:(SAQwenAnalyzeCompletion)completion;
+
+/**
+ * @brief 使用 qwen-vl-max 对多张图片进行批量分析，并按资源标识返回逐张结果。
+ * @param items 批量分析请求项数组。
+ * @param completion 分析完成回调。
+ */
+- (void)analyzeBatchItems:(NSArray<SAQwenAnalyzeItem *> *)items
+               completion:(SAQwenBatchAnalyzeCompletion)completion;
 
 @end
 

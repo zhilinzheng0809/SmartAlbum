@@ -2,6 +2,26 @@
 #import "SAPhotoClassification.h"
 #import <UIKit/UIKit.h>
 
+@implementation SAQwenAnalyzeItem
+
+/**
+ * @brief 使用图片数据和资源标识初始化一条批量分析请求项。
+ * @param imageData JPEG 图片数据。
+ * @param localIdentifier 相册资源唯一标识。
+ * @return 请求项对象。
+ */
+- (instancetype)initWithImageData:(NSData *)imageData
+                  localIdentifier:(NSString *)localIdentifier {
+    self = [super init];
+    if (self) {
+        _imageData = [imageData copy];
+        _localIdentifier = [localIdentifier copy];
+    }
+    return self;
+}
+
+@end
+
 @interface SAQwenVLService ()
 
 @property (nonatomic, copy) NSString *apiKey;
@@ -57,20 +77,55 @@
 - (void)analyzeImageData:(NSData *)imageData
          localIdentifier:(NSString *)localIdentifier
               completion:(SAQwenAnalyzeCompletion)completion {
+    SAQwenAnalyzeItem *item = [[SAQwenAnalyzeItem alloc] initWithImageData:imageData localIdentifier:localIdentifier];
+    [self analyzeBatchItems:@[item] completion:^(NSDictionary<NSString *,SAPhotoClassification *> * _Nonnull classifications, NSArray<NSString *> * _Nonnull failedIdentifiers, NSError * _Nullable error) {
+        SAPhotoClassification *classification = classifications[localIdentifier];
+        if (classification != nil) {
+            completion(classification, nil);
+            return;
+        }
+
+        if (error != nil) {
+            completion(nil, error);
+            return;
+        }
+
+        NSError *fallbackError = [NSError errorWithDomain:@"SAQwenVLService"
+                                                     code:1008
+                                                 userInfo:@{NSLocalizedDescriptionKey: @"模型未返回该照片的分析结果。"}];
+        completion(nil, fallbackError);
+    }];
+}
+
+/**
+ * @brief 使用 qwen-vl-max 对多张图片进行批量分析，并按资源标识返回逐张结果。
+ * @param items 批量分析请求项数组。
+ * @param completion 分析完成回调。
+ */
+- (void)analyzeBatchItems:(NSArray<SAQwenAnalyzeItem *> *)items
+               completion:(SAQwenBatchAnalyzeCompletion)completion {
     if (![self isConfigured]) {
         NSError *error = [NSError errorWithDomain:@"SAQwenVLService"
                                              code:1001
                                          userInfo:@{NSLocalizedDescriptionKey: [self configurationMessage]}];
-        completion(nil, error);
+        completion(@{}, @[], error);
         return;
     }
 
-    NSString *dataURL = [self dataURLStringForImageData:imageData];
-    NSDictionary *payload = [self requestPayloadWithDataURL:dataURL];
+    NSArray<SAQwenAnalyzeItem *> *validItems = [self normalizedAnalyzeItems:items];
+    if (validItems.count == 0) {
+        NSError *error = [NSError errorWithDomain:@"SAQwenVLService"
+                                             code:1006
+                                         userInfo:@{NSLocalizedDescriptionKey: @"没有可提交给模型的照片。"}];
+        completion(@{}, @[], error);
+        return;
+    }
+
+    NSDictionary *payload = [self requestPayloadWithAnalyzeItems:validItems];
     NSError *serializationError = nil;
     NSData *bodyData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&serializationError];
     if (bodyData == nil || serializationError != nil) {
-        completion(nil, serializationError);
+        completion(@{}, @[], serializationError);
         return;
     }
 
@@ -85,32 +140,56 @@
                                                  completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (error != nil) {
+            NSMutableArray<NSString *> *allIdentifiers = [NSMutableArray array];
+            for (SAQwenAnalyzeItem *item in validItems) {
+                if (item.localIdentifier.length > 0) {
+                    [allIdentifiers addObject:item.localIdentifier];
+                }
+            }
             dispatch_async(dispatch_get_main_queue(), ^{
-                completion(nil, error);
+                completion(@{}, allIdentifiers.copy, error);
             });
             return;
         }
 
         NSError *parseError = nil;
-        SAPhotoClassification *classification = [strongSelf parseResponseData:data
-                                                              localIdentifier:localIdentifier
-                                                                        error:&parseError];
+        NSDictionary<NSString *, SAPhotoClassification *> *classifications = [strongSelf parseBatchResponseData:data
+                                                                                                           items:validItems
+                                                                                                           error:&parseError];
+        NSArray<NSString *> *failedIdentifiers = [strongSelf failedIdentifiersForItems:validItems
+                                                                      classifications:classifications];
         dispatch_async(dispatch_get_main_queue(), ^{
-            completion(classification, parseError);
+            completion(classifications, failedIdentifiers, parseError);
         });
     }];
     [task resume];
 }
 
 /**
- * @brief 生成符合 OpenAI 兼容接口的多模态请求体。
- * @param dataURL 图片的 Base64 Data URL。
+ * @brief 生成符合 OpenAI 兼容接口的多图批量请求体。
+ * @param items 批量请求项数组。
  * @return 请求体字典。
  */
-- (NSDictionary<NSString *, id> *)requestPayloadWithDataURL:(NSString *)dataURL {
-    NSString *instruction = @"请分析这张照片，并严格输出 JSON 对象，不要输出 Markdown。JSON 格式为："
-    @"{\"summary\":\"一句中文摘要\",\"tags\":[\"标签1\",\"标签2\",\"标签3\"]}。"
-    @"要求：1. tags 使用简短中文标签；2. 不要包含人名猜测、品牌臆测或隐私信息；3. tags 数量控制在 3 到 8 个。";
+- (NSDictionary<NSString *, id> *)requestPayloadWithAnalyzeItems:(NSArray<SAQwenAnalyzeItem *> *)items {
+    NSString *instruction = [NSString stringWithFormat:
+                             @"请按输入顺序分析以下 %lu 张照片，并严格输出 JSON 对象，不要输出 Markdown。"
+                             @"JSON 格式为：{\"results\":[{\"index\":0,\"summary\":\"一句中文摘要\",\"tags\":[\"标签1\",\"标签2\"]}]}"
+                             @"要求：1. 每张照片都返回一项结果，index 必须与图片顺序一致；2. tags 使用简短中文标签；3. 不要包含人名猜测、品牌臆测或隐私信息；4. tags 数量控制在 3 到 8 个；5. 如果某张图片信息不足，也要返回简短 summary 和尽量稳妥的标签。",
+                             (unsigned long)items.count];
+    NSMutableArray<NSDictionary<NSString *, id> *> *userContent = [NSMutableArray array];
+    [userContent addObject:@{
+        @"type": @"text",
+        @"text": instruction
+    }];
+
+    for (SAQwenAnalyzeItem *item in items) {
+        [userContent addObject:@{
+            @"type": @"image_url",
+            @"image_url": @{
+                @"url": [self dataURLStringForImageData:item.imageData]
+            }
+        }];
+    }
 
     return @{
         @"model": self.modelName,
@@ -121,22 +200,11 @@
             },
             @{
                 @"role": @"user",
-                @"content": @[
-                    @{
-                        @"type": @"text",
-                        @"text": instruction
-                    },
-                    @{
-                        @"type": @"image_url",
-                        @"image_url": @{
-                            @"url": dataURL
-                        }
-                    }
-                ]
+                @"content": userContent.copy
             }
         ],
         @"temperature": @0.2,
-        @"max_tokens": @500,
+        @"max_tokens": @(MAX(600, items.count * 220)),
         @"response_format": @{
             @"type": @"json_object"
         }
@@ -144,27 +212,27 @@
 }
 
 /**
- * @brief 将接口返回解析为照片标签结果。
+ * @brief 将批量接口返回解析为多张照片标签结果。
  * @param data 响应数据。
- * @param localIdentifier 相册资源唯一标识。
+ * @param items 批量请求项数组。
  * @param error 输出错误对象。
- * @return 照片标签结果。
+ * @return 资源标识到照片标签结果的映射。
  */
-- (SAPhotoClassification *)parseResponseData:(NSData *)data
-                              localIdentifier:(NSString *)localIdentifier
-                                        error:(NSError * __autoreleasing *)error {
+- (NSDictionary<NSString *, SAPhotoClassification *> *)parseBatchResponseData:(NSData *)data
+                                                                        items:(NSArray<SAQwenAnalyzeItem *> *)items
+                                                                        error:(NSError * __autoreleasing *)error {
     if (data.length == 0) {
         if (error != NULL) {
             *error = [NSError errorWithDomain:@"SAQwenVLService"
                                          code:1002
                                      userInfo:@{NSLocalizedDescriptionKey: @"模型返回为空。"}];
         }
-        return nil;
+        return @{};
     }
 
     NSDictionary *root = [NSJSONSerialization JSONObjectWithData:data options:0 error:error];
     if (![root isKindOfClass:[NSDictionary class]]) {
-        return nil;
+        return @{};
     }
 
     NSDictionary *apiError = root[@"error"];
@@ -175,7 +243,7 @@
                                          code:1003
                                      userInfo:@{NSLocalizedDescriptionKey: message}];
         }
-        return nil;
+        return @{};
     }
 
     NSArray *choices = root[@"choices"];
@@ -185,7 +253,7 @@
                                          code:1004
                                      userInfo:@{NSLocalizedDescriptionKey: @"模型未返回可用结果。"}];
         }
-        return nil;
+        return @{};
     }
 
     NSDictionary *message = [choices.firstObject objectForKey:@"message"];
@@ -196,22 +264,53 @@
                                          code:1005
                                      userInfo:@{NSLocalizedDescriptionKey: @"模型返回内容格式异常。"}];
         }
-        return nil;
+        return @{};
     }
 
     NSData *jsonData = [content dataUsingEncoding:NSUTF8StringEncoding];
     NSDictionary *payload = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:error];
     if (![payload isKindOfClass:[NSDictionary class]]) {
-        return nil;
+        return @{};
     }
 
-    NSString *summary = [payload[@"summary"] isKindOfClass:[NSString class]] ? payload[@"summary"] : @"";
-    NSArray<NSString *> *tags = [payload[@"tags"] isKindOfClass:[NSArray class]] ? payload[@"tags"] : @[];
-    SAPhotoClassification *classification = [[SAPhotoClassification alloc] initWithLocalIdentifier:localIdentifier
-                                                                                            summary:summary
-                                                                                               tags:tags
-                                                                                         analyzedAt:[NSDate date]];
-    return classification;
+    NSArray *results = payload[@"results"];
+    if (![results isKindOfClass:[NSArray class]]) {
+        if (items.count == 1) {
+            SAPhotoClassification *classification = [self classificationFromDictionary:payload localIdentifier:items.firstObject.localIdentifier];
+            return classification != nil ? @{items.firstObject.localIdentifier: classification} : @{};
+        }
+
+        if (error != NULL) {
+            *error = [NSError errorWithDomain:@"SAQwenVLService"
+                                         code:1007
+                                     userInfo:@{NSLocalizedDescriptionKey: @"模型返回缺少 results 数组。"}];
+        }
+        return @{};
+    }
+
+    NSMutableDictionary<NSString *, SAPhotoClassification *> *classifications = [NSMutableDictionary dictionary];
+    for (NSDictionary *result in results) {
+        if (![result isKindOfClass:[NSDictionary class]]) {
+            continue;
+        }
+
+        NSNumber *indexNumber = result[@"index"];
+        if (![indexNumber isKindOfClass:[NSNumber class]]) {
+            continue;
+        }
+
+        NSInteger index = indexNumber.integerValue;
+        if (index < 0 || index >= (NSInteger)items.count) {
+            continue;
+        }
+
+        SAQwenAnalyzeItem *item = items[(NSUInteger)index];
+        SAPhotoClassification *classification = [self classificationFromDictionary:result localIdentifier:item.localIdentifier];
+        if (classification != nil) {
+            classifications[item.localIdentifier] = classification;
+        }
+    }
+    return classifications.copy;
 }
 
 /**
@@ -222,6 +321,63 @@
 - (NSString *)dataURLStringForImageData:(NSData *)imageData {
     NSString *base64 = [imageData base64EncodedStringWithOptions:0];
     return [NSString stringWithFormat:@"data:image/jpeg;base64,%@", base64];
+}
+
+/**
+ * @brief 过滤出可提交给模型的有效请求项，避免空数据进入请求体。
+ * @param items 原始请求项数组。
+ * @return 清洗后的请求项数组。
+ */
+- (NSArray<SAQwenAnalyzeItem *> *)normalizedAnalyzeItems:(NSArray<SAQwenAnalyzeItem *> *)items {
+    NSMutableArray<SAQwenAnalyzeItem *> *validItems = [NSMutableArray array];
+    for (SAQwenAnalyzeItem *item in items) {
+        if (![item isKindOfClass:[SAQwenAnalyzeItem class]]) {
+            continue;
+        }
+
+        if (item.localIdentifier.length == 0 || item.imageData.length == 0) {
+            continue;
+        }
+        [validItems addObject:item];
+    }
+    return validItems.copy;
+}
+
+/**
+ * @brief 根据批量解析结果计算失败的资源标识列表。
+ * @param items 原始请求项数组。
+ * @param classifications 成功解析的结果映射。
+ * @return 未成功生成结果的资源标识数组。
+ */
+- (NSArray<NSString *> *)failedIdentifiersForItems:(NSArray<SAQwenAnalyzeItem *> *)items
+                                   classifications:(NSDictionary<NSString *, SAPhotoClassification *> *)classifications {
+    NSMutableArray<NSString *> *failedIdentifiers = [NSMutableArray array];
+    for (SAQwenAnalyzeItem *item in items) {
+        if (classifications[item.localIdentifier] == nil) {
+            [failedIdentifiers addObject:item.localIdentifier];
+        }
+    }
+    return failedIdentifiers.copy;
+}
+
+/**
+ * @brief 将模型输出字典转换为单张照片标签结果。
+ * @param dictionary 模型返回字典。
+ * @param localIdentifier 相册资源唯一标识。
+ * @return 照片标签结果对象。
+ */
+- (SAPhotoClassification * _Nullable)classificationFromDictionary:(NSDictionary<NSString *, id> *)dictionary
+                                                  localIdentifier:(NSString *)localIdentifier {
+    NSString *summary = [dictionary[@"summary"] isKindOfClass:[NSString class]] ? dictionary[@"summary"] : @"";
+    NSArray<NSString *> *tags = [dictionary[@"tags"] isKindOfClass:[NSArray class]] ? dictionary[@"tags"] : @[];
+    if (summary.length == 0 && tags.count == 0) {
+        return nil;
+    }
+
+    return [[SAPhotoClassification alloc] initWithLocalIdentifier:localIdentifier
+                                                          summary:summary
+                                                             tags:tags
+                                                       analyzedAt:[NSDate date]];
 }
 
 /**

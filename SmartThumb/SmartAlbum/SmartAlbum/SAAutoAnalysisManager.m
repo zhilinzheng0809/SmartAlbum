@@ -16,6 +16,8 @@ NSString * const SAAutoAnalysisStatusTextKey = @"statusText";
 
 static NSString * const SAAutoAnalysisPromptHandledDefaultsKey = @"SAAutoAnalysisPromptHandledDefaultsKey";
 static NSString * const SAAutoAnalysisEnabledDefaultsKey = @"SAAutoAnalysisEnabledDefaultsKey";
+static NSInteger const SAAutoAnalysisBatchSize = 4;
+static NSInteger const SAAutoAnalysisMaxConcurrentBatches = 2;
 
 @interface SAAutoAnalysisManager () <PHPhotoLibraryChangeObserver>
 
@@ -24,7 +26,7 @@ static NSString * const SAAutoAnalysisEnabledDefaultsKey = @"SAAutoAnalysisEnabl
 @property (nonatomic, strong) SAQwenVLService *qwenService;
 @property (nonatomic, strong) PHFetchResult<PHAsset *> *allImageAssetsFetchResult;
 @property (nonatomic, strong) NSMutableOrderedSet<NSString *> *pendingAssetIdentifiers;
-@property (nonatomic, strong) NSMutableSet<NSString *> *processingAssetIdentifiers;
+@property (nonatomic, strong) NSMutableOrderedSet<NSString *> *processingAssetIdentifiers;
 @property (nonatomic, assign, readwrite) BOOL autoAnalysisEnabled;
 @property (nonatomic, assign, readwrite) BOOL isAnalyzing;
 @property (nonatomic, assign) NSInteger totalCount;
@@ -33,6 +35,7 @@ static NSString * const SAAutoAnalysisEnabledDefaultsKey = @"SAAutoAnalysisEnabl
 @property (nonatomic, copy, nullable) NSString *currentAnalyzingIdentifier;
 @property (nonatomic, copy) NSString *statusText;
 @property (nonatomic, assign) BOOL hasRegisteredPhotoObserver;
+@property (nonatomic, assign) NSInteger runningBatchCount;
 
 @end
 
@@ -59,7 +62,7 @@ static NSString * const SAAutoAnalysisEnabledDefaultsKey = @"SAAutoAnalysisEnabl
     self = [super init];
     if (self) {
         _pendingAssetIdentifiers = [NSMutableOrderedSet orderedSet];
-        _processingAssetIdentifiers = [NSMutableSet set];
+        _processingAssetIdentifiers = [NSMutableOrderedSet orderedSet];
         _autoAnalysisEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:SAAutoAnalysisEnabledDefaultsKey];
         _statusText = @"自动分析未开启。";
         [[NSNotificationCenter defaultCenter] addObserver:self
@@ -141,6 +144,7 @@ static NSString * const SAAutoAnalysisEnabledDefaultsKey = @"SAAutoAnalysisEnabl
     self.totalCount = 0;
     self.completedCount = 0;
     self.failedCount = 0;
+    self.runningBatchCount = 0;
     [self enqueueUnanalyzedAssetsFromCurrentLibraryResetProgress:YES];
     [self startNextAnalysisIfNeeded];
 }
@@ -269,6 +273,8 @@ static NSString * const SAAutoAnalysisEnabledDefaultsKey = @"SAAutoAnalysisEnabl
         self.failedCount = 0;
         self.totalCount = 0;
         self.currentAnalyzingIdentifier = nil;
+        self.runningBatchCount = 0;
+        self.isAnalyzing = NO;
     }
 
     NSInteger appendedCount = 0;
@@ -294,95 +300,264 @@ static NSString * const SAAutoAnalysisEnabledDefaultsKey = @"SAAutoAnalysisEnabl
     }
 
     if (self.autoAnalysisEnabled) {
-        self.statusText = self.pendingAssetIdentifiers.count > 0 ? @"自动分析已开启，正在后台准备照片分析任务。" : @"自动分析已开启，新增照片会自动分析。";
+        self.statusText = self.pendingAssetIdentifiers.count > 0 ? @"自动分析已开启，正在后台准备批量分析任务。" : @"自动分析已开启，新增照片会自动分析。";
     }
     [self notifyProgressChanged];
 }
 
 /**
- * @brief 在当前没有任务执行时启动下一张照片的后台分析。
+ * @brief 在可用并发槽位下启动下一批后台分析任务。
  */
 - (void)startNextAnalysisIfNeeded {
-    if (!self.autoAnalysisEnabled || self.isAnalyzing || self.pendingAssetIdentifiers.count == 0) {
-        if (self.autoAnalysisEnabled && !self.isAnalyzing && self.pendingAssetIdentifiers.count == 0 && self.totalCount > 0) {
-            self.statusText = self.failedCount > 0 ? @"后台自动分析已完成，部分照片分析失败。" : @"后台自动分析已完成，后续新增照片会继续自动分析。";
-            [self notifyProgressChanged];
-        }
+    if (!self.autoAnalysisEnabled) {
         return;
     }
 
     if (self.imageManager == nil || self.tagStore == nil || self.qwenService == nil || ![self.qwenService isConfigured]) {
         self.statusText = @"自动分析未启动，请先完成 Qwen 配置。";
+        [self refreshRunningState];
         [self notifyProgressChanged];
         return;
     }
 
-    NSString *identifier = self.pendingAssetIdentifiers.firstObject;
-    [self.pendingAssetIdentifiers removeObjectAtIndex:0];
-    if (identifier.length == 0) {
-        [self startNextAnalysisIfNeeded];
-        return;
-    }
+    while (self.runningBatchCount < SAAutoAnalysisMaxConcurrentBatches && self.pendingAssetIdentifiers.count > 0) {
+        NSArray<NSString *> *batchIdentifiers = [self dequeuePendingIdentifiersWithLimit:SAAutoAnalysisBatchSize];
+        NSArray<PHAsset *> *batchAssets = [self validAssetsForIdentifiers:batchIdentifiers];
+        if (batchAssets.count == 0) {
+            continue;
+        }
 
-    PHFetchResult<PHAsset *> *result = [PHAsset fetchAssetsWithLocalIdentifiers:@[identifier] options:nil];
-    PHAsset *asset = result.firstObject;
-    if (asset == nil || asset.mediaType != PHAssetMediaTypeImage || [self.tagStore hasClassificationForIdentifier:identifier]) {
-        self.completedCount += 1;
-        [self startNextAnalysisIfNeeded];
+        for (PHAsset *asset in batchAssets) {
+            [self.processingAssetIdentifiers addObject:asset.localIdentifier];
+        }
+        self.runningBatchCount += 1;
+        [self refreshRunningState];
+        self.statusText = [NSString stringWithFormat:@"后台批量分析进行中，已完成 %ld / %ld，当前并发 %ld 批。",
+                           (long)self.completedCount,
+                           (long)MAX(self.totalCount, 1),
+                           (long)self.runningBatchCount];
         [self notifyProgressChanged];
-        return;
+
+        __weak typeof(self) weakSelf = self;
+        [self requestOptimizedAnalyzeItemsForAssets:batchAssets completion:^(NSArray<SAQwenAnalyzeItem *> * _Nonnull items, NSArray<NSString *> * _Nonnull failedReadIdentifiers) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf == nil) {
+                return;
+            }
+            [strongSelf handlePreparedBatchItems:items
+                           failedReadIdentifiers:failedReadIdentifiers];
+        }];
     }
 
-    self.isAnalyzing = YES;
-    self.currentAnalyzingIdentifier = identifier;
-    [self.processingAssetIdentifiers addObject:identifier];
-    self.statusText = [NSString stringWithFormat:@"后台正在分析第 %ld / %ld 张照片，不影响你继续浏览和搜索。",
-                       (long)(self.completedCount + 1),
-                       (long)MAX(self.totalCount, 1)];
-    [self notifyProgressChanged];
+    [self refreshRunningState];
+    if (!self.isAnalyzing && self.pendingAssetIdentifiers.count == 0 && self.totalCount > 0) {
+        self.statusText = self.failedCount > 0 ? @"后台自动分析已完成，部分照片分析失败。" : @"后台自动分析已完成，后续新增照片会继续自动分析。";
+        [self notifyProgressChanged];
+    }
+}
+
+/**
+ * @brief 从待分析队列中取出下一批资源标识。
+ * @param limit 批次大小上限。
+ * @return 资源标识数组。
+ */
+- (NSArray<NSString *> *)dequeuePendingIdentifiersWithLimit:(NSInteger)limit {
+    NSMutableArray<NSString *> *identifiers = [NSMutableArray array];
+    NSInteger count = MIN(limit, self.pendingAssetIdentifiers.count);
+    for (NSInteger index = 0; index < count; index += 1) {
+        NSString *identifier = self.pendingAssetIdentifiers.firstObject;
+        if (identifier.length > 0) {
+            [identifiers addObject:identifier];
+        }
+        [self.pendingAssetIdentifiers removeObjectAtIndex:0];
+    }
+    return identifiers.copy;
+}
+
+/**
+ * @brief 将资源标识映射回仍需分析的有效图片资源。
+ * @param identifiers 资源标识数组。
+ * @return 可分析图片资源数组。
+ */
+- (NSArray<PHAsset *> *)validAssetsForIdentifiers:(NSArray<NSString *> *)identifiers {
+    NSMutableArray<PHAsset *> *assets = [NSMutableArray array];
+    NSInteger skippedCount = 0;
+    for (NSString *identifier in identifiers) {
+        if (identifier.length == 0) {
+            skippedCount += 1;
+            continue;
+        }
+
+        PHFetchResult<PHAsset *> *result = [PHAsset fetchAssetsWithLocalIdentifiers:@[identifier] options:nil];
+        PHAsset *asset = result.firstObject;
+        if (asset == nil || asset.mediaType != PHAssetMediaTypeImage || [self.tagStore hasClassificationForIdentifier:identifier]) {
+            skippedCount += 1;
+            continue;
+        }
+        [assets addObject:asset];
+    }
+
+    if (skippedCount > 0) {
+        self.completedCount += skippedCount;
+    }
+    return assets.copy;
+}
+
+/**
+ * @brief 读取一批照片并压缩为适合提交给模型的请求项。
+ * @param assets 待读取照片数组。
+ * @param completion 请求项及读取失败标识回调。
+ */
+- (void)requestOptimizedAnalyzeItemsForAssets:(NSArray<PHAsset *> *)assets
+                                   completion:(void (^)(NSArray<SAQwenAnalyzeItem *> *items, NSArray<NSString *> *failedReadIdentifiers))completion {
+    dispatch_group_t group = dispatch_group_create();
+    dispatch_queue_t syncQueue = dispatch_queue_create("com.smartalbum.autoanalysis.prepare", DISPATCH_QUEUE_SERIAL);
+    NSMutableArray<SAQwenAnalyzeItem *> *preparedItems = [NSMutableArray array];
+    NSMutableArray<NSString *> *failedIdentifiers = [NSMutableArray array];
+
+    for (PHAsset *asset in assets) {
+        dispatch_group_enter(group);
+        [self requestOptimizedImageDataForAsset:asset completion:^(NSData * _Nullable imageData) {
+            dispatch_async(syncQueue, ^{
+                if (imageData.length > 0) {
+                    SAQwenAnalyzeItem *item = [[SAQwenAnalyzeItem alloc] initWithImageData:imageData localIdentifier:asset.localIdentifier];
+                    [preparedItems addObject:item];
+                } else {
+                    [failedIdentifiers addObject:asset.localIdentifier ?: @""];
+                }
+                dispatch_group_leave(group);
+            });
+        }];
+    }
+
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+        completion(preparedItems.copy, failedIdentifiers.copy);
+    });
+}
+
+/**
+ * @brief 处理已准备好的批量请求项，并在必要时自动降级为单张重试。
+ * @param items 已准备好的请求项数组。
+ * @param failedReadIdentifiers 图片读取失败的资源标识数组。
+ */
+- (void)handlePreparedBatchItems:(NSArray<SAQwenAnalyzeItem *> *)items
+           failedReadIdentifiers:(NSArray<NSString *> *)failedReadIdentifiers {
+    if (failedReadIdentifiers.count > 0) {
+        [self.processingAssetIdentifiers removeObjectsInArray:failedReadIdentifiers];
+        self.completedCount += failedReadIdentifiers.count;
+        self.failedCount += failedReadIdentifiers.count;
+    }
+
+    if (items.count == 0) {
+        self.runningBatchCount = MAX(0, self.runningBatchCount - 1);
+        [self refreshRunningState];
+        self.statusText = @"后台分析继续进行中，刚刚有照片读取失败。";
+        [self notifyProgressChanged];
+        [self startNextAnalysisIfNeeded];
+        return;
+    }
 
     __weak typeof(self) weakSelf = self;
-    [self requestOptimizedImageDataForAsset:asset completion:^(NSData * _Nullable imageData) {
+    [self.qwenService analyzeBatchItems:items completion:^(NSDictionary<NSString *,SAPhotoClassification *> * _Nonnull classifications, NSArray<NSString *> * _Nonnull failedIdentifiers, NSError * _Nullable error) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (strongSelf == nil) {
             return;
         }
 
-        if (imageData.length == 0) {
-            [strongSelf finishAutoAnalysisForIdentifier:identifier classification:nil error:[NSError errorWithDomain:@"SAAutoAnalysisManager"
-                                                                                                                  code:2001
-                                                                                                              userInfo:@{NSLocalizedDescriptionKey: @"照片读取失败"}]];
+        if (error != nil && items.count > 1) {
+            [strongSelf analyzeItemsIndividually:items completion:^(NSDictionary<NSString *,SAPhotoClassification *> * _Nonnull fallbackClassifications, NSArray<NSString *> * _Nonnull fallbackFailedIdentifiers) {
+                [strongSelf finishBatchItems:items
+                              classifications:fallbackClassifications
+                           failedIdentifiers:fallbackFailedIdentifiers
+                                       error:error];
+            }];
             return;
         }
 
-        [strongSelf.qwenService analyzeImageData:imageData localIdentifier:identifier completion:^(SAPhotoClassification * _Nullable classification, NSError * _Nullable error) {
-            [strongSelf finishAutoAnalysisForIdentifier:identifier classification:classification error:error];
-        }];
+        [strongSelf finishBatchItems:items
+                      classifications:classifications
+                   failedIdentifiers:failedIdentifiers
+                               error:error];
     }];
 }
 
 /**
- * @brief 完成单张照片后台分析后更新进度，并继续处理队列。
- * @param identifier 当前照片标识。
- * @param classification 分析结果。
- * @param error 错误对象。
+ * @brief 将一批请求项降级为逐张分析，以降低批量失败带来的损失。
+ * @param items 待降级的请求项数组。
+ * @param completion 完成回调。
  */
-- (void)finishAutoAnalysisForIdentifier:(NSString *)identifier
-                         classification:(SAPhotoClassification * _Nullable)classification
-                                  error:(NSError * _Nullable)error {
-    [self.processingAssetIdentifiers removeObject:identifier];
-    self.completedCount += 1;
-    if (classification != nil) {
-        [self.tagStore saveClassification:classification];
-    } else {
-        self.failedCount += 1;
+- (void)analyzeItemsIndividually:(NSArray<SAQwenAnalyzeItem *> *)items
+                      completion:(void (^)(NSDictionary<NSString *, SAPhotoClassification *> *classifications, NSArray<NSString *> *failedIdentifiers))completion {
+    if (items.count == 0) {
+        completion(@{}, @[]);
+        return;
     }
 
-    self.isAnalyzing = NO;
-    self.currentAnalyzingIdentifier = nil;
-    self.statusText = error != nil ? @"后台分析继续进行中，刚刚有照片分析失败。" : @"后台分析继续进行中。";
+    NSMutableDictionary<NSString *, SAPhotoClassification *> *classifications = [NSMutableDictionary dictionary];
+    NSMutableArray<NSString *> *failedIdentifiers = [NSMutableArray array];
+    dispatch_group_t group = dispatch_group_create();
+
+    for (SAQwenAnalyzeItem *item in items) {
+        dispatch_group_enter(group);
+        [self.qwenService analyzeImageData:item.imageData localIdentifier:item.localIdentifier completion:^(SAPhotoClassification * _Nullable classification, NSError * _Nullable error) {
+            if (classification != nil) {
+                classifications[item.localIdentifier] = classification;
+            } else {
+                [failedIdentifiers addObject:item.localIdentifier];
+            }
+            dispatch_group_leave(group);
+        }];
+    }
+
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+        completion(classifications.copy, failedIdentifiers.copy);
+    });
+}
+
+/**
+ * @brief 处理一批照片的最终分析结果并刷新整体进度。
+ * @param items 当前批次请求项。
+ * @param classifications 成功结果映射。
+ * @param failedIdentifiers 失败资源标识数组。
+ * @param error 错误对象。
+ */
+- (void)finishBatchItems:(NSArray<SAQwenAnalyzeItem *> *)items
+          classifications:(NSDictionary<NSString *, SAPhotoClassification *> *)classifications
+       failedIdentifiers:(NSArray<NSString *> *)failedIdentifiers
+                   error:(NSError * _Nullable)error {
+    NSMutableArray<NSString *> *processedIdentifiers = [NSMutableArray array];
+    for (SAQwenAnalyzeItem *item in items) {
+        [processedIdentifiers addObject:item.localIdentifier];
+        SAPhotoClassification *classification = classifications[item.localIdentifier];
+        if (classification != nil) {
+            [self.tagStore saveClassification:classification];
+        }
+    }
+
+    [self.processingAssetIdentifiers removeObjectsInArray:processedIdentifiers];
+    self.completedCount += processedIdentifiers.count;
+    self.failedCount += failedIdentifiers.count;
+    self.runningBatchCount = MAX(0, self.runningBatchCount - 1);
+    [self refreshRunningState];
+
+    if (error != nil && failedIdentifiers.count > 0) {
+        self.statusText = @"后台批量分析继续进行中，部分照片已降级重试但仍失败。";
+    } else if (failedIdentifiers.count > 0) {
+        self.statusText = @"后台批量分析继续进行中，部分照片分析失败。";
+    } else {
+        self.statusText = @"后台批量分析继续进行中。";
+    }
+
     [self notifyProgressChanged];
     [self startNextAnalysisIfNeeded];
+}
+
+/**
+ * @brief 根据当前处理集合刷新运行态和当前分析标识。
+ */
+- (void)refreshRunningState {
+    self.isAnalyzing = self.runningBatchCount > 0;
+    self.currentAnalyzingIdentifier = self.processingAssetIdentifiers.firstObject;
 }
 
 /**

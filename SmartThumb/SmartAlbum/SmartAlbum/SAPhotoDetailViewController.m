@@ -1,4 +1,5 @@
 #import "SAPhotoDetailViewController.h"
+#import "SAFullscreenPhotoViewController.h"
 #import "SAPhotoClassification.h"
 #import "SAQwenVLService.h"
 #import "SATagStore.h"
@@ -82,7 +83,10 @@
     self.imageView.backgroundColor = [UIColor secondarySystemBackgroundColor];
     self.imageView.layer.cornerRadius = 16.0;
     self.imageView.layer.masksToBounds = YES;
+    self.imageView.userInteractionEnabled = YES;
     [self.imageView.heightAnchor constraintEqualToConstant:360].active = YES;
+    UITapGestureRecognizer *tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(photoTapped)];
+    [self.imageView addGestureRecognizer:tapGesture];
 
     self.timeLabel = [self infoLabelWithFont:[UIFont systemFontOfSize:14 weight:UIFontWeightMedium]];
     self.summaryTitleLabel = [self titleLabelWithText:@"照片摘要"];
@@ -126,6 +130,16 @@
         [self.contentStack.bottomAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.bottomAnchor constant:-24],
         [self.contentStack.widthAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.widthAnchor constant:-32]
     ]];
+}
+
+/**
+ * @brief 点击详情页照片时进入沉浸式大图浏览模式。
+ */
+- (void)photoTapped {
+    SAFullscreenPhotoViewController *viewController = [[SAFullscreenPhotoViewController alloc] initWithAsset:self.asset
+                                                                                                imageManager:self.imageManager
+                                                                                            placeholderImage:self.imageView.image];
+    [self presentViewController:viewController animated:YES completion:nil];
 }
 
 /**
