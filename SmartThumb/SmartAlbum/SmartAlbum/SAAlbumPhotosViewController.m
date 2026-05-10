@@ -8,8 +8,8 @@
 #import <Photos/Photos.h>
 
 static NSString * const SAAlbumPhotoGridCellIdentifier = @"SAAlbumPhotoGridCellIdentifier";
-static NSInteger const SAAlbumAnalyzeBatchSize = 4;
-static NSInteger const SAAlbumAnalyzeMaxConcurrentBatches = 2;
+static NSInteger const SAAlbumAnalyzeBatchSize = 10;
+static NSInteger const SAAlbumAnalyzeMaxConcurrentBatches = 10;
 
 @interface SAAlbumPhotosViewController () <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout, UISearchResultsUpdating, UISearchBarDelegate>
 
@@ -534,29 +534,54 @@ static NSInteger const SAAlbumAnalyzeMaxConcurrentBatches = 2;
  */
 - (void)requestOptimizedAnalyzeItemsForAssets:(NSArray<PHAsset *> *)assets
                                    completion:(void (^)(NSArray<SAQwenAnalyzeItem *> *items, NSArray<NSString *> *failedReadIdentifiers))completion {
-    dispatch_group_t group = dispatch_group_create();
-    dispatch_queue_t syncQueue = dispatch_queue_create("com.smartalbum.albumanalysis.prepare", DISPATCH_QUEUE_SERIAL);
     NSMutableArray<SAQwenAnalyzeItem *> *preparedItems = [NSMutableArray array];
     NSMutableArray<NSString *> *failedIdentifiers = [NSMutableArray array];
+    [self prepareAnalyzeItemsFromAssets:assets
+                                  index:0
+                          preparedItems:preparedItems
+                      failedIdentifiers:failedIdentifiers
+                             completion:completion];
+}
 
-    for (PHAsset *asset in assets) {
-        dispatch_group_enter(group);
-        [self requestOptimizedImageDataForAsset:asset completion:^(NSData * _Nullable imageData) {
-            dispatch_async(syncQueue, ^{
-                if (imageData.length > 0) {
-                    SAQwenAnalyzeItem *item = [[SAQwenAnalyzeItem alloc] initWithImageData:imageData localIdentifier:asset.localIdentifier];
-                    [preparedItems addObject:item];
-                } else {
-                    [failedIdentifiers addObject:asset.localIdentifier ?: @""];
-                }
-                dispatch_group_leave(group);
-            });
-        }];
+/**
+ * @brief 按顺序准备批次请求项，避免同一批里同时解码过多图片导致内存峰值过高。
+ * @param assets 当前批次照片数组。
+ * @param index 当前处理索引。
+ * @param preparedItems 已准备好的请求项数组。
+ * @param failedIdentifiers 读取失败标识数组。
+ * @param completion 完成回调。
+ */
+- (void)prepareAnalyzeItemsFromAssets:(NSArray<PHAsset *> *)assets
+                                index:(NSUInteger)index
+                        preparedItems:(NSMutableArray<SAQwenAnalyzeItem *> *)preparedItems
+                    failedIdentifiers:(NSMutableArray<NSString *> *)failedIdentifiers
+                           completion:(void (^)(NSArray<SAQwenAnalyzeItem *> *items, NSArray<NSString *> *failedReadIdentifiers))completion {
+    if (index >= assets.count) {
+        completion(preparedItems.copy, failedIdentifiers.copy);
+        return;
     }
 
-    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
-        completion(preparedItems.copy, failedIdentifiers.copy);
-    });
+    PHAsset *asset = assets[index];
+    __weak typeof(self) weakSelf = self;
+    [self requestOptimizedImageDataForAsset:asset completion:^(NSData * _Nullable imageData) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+
+        if (imageData.length > 0) {
+            SAQwenAnalyzeItem *item = [[SAQwenAnalyzeItem alloc] initWithImageData:imageData localIdentifier:asset.localIdentifier];
+            [preparedItems addObject:item];
+        } else {
+            [failedIdentifiers addObject:asset.localIdentifier ?: @""];
+        }
+
+        [strongSelf prepareAnalyzeItemsFromAssets:assets
+                                            index:index + 1
+                                    preparedItems:preparedItems
+                                failedIdentifiers:failedIdentifiers
+                                       completion:completion];
+    }];
 }
 
 /**
@@ -712,20 +737,42 @@ static NSInteger const SAAlbumAnalyzeMaxConcurrentBatches = 2;
     PHImageRequestOptions *options = [[PHImageRequestOptions alloc] init];
     options.networkAccessAllowed = YES;
     options.deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
+    options.resizeMode = PHImageRequestOptionsResizeModeExact;
     options.version = PHImageRequestOptionsVersionCurrent;
 
-    [self.imageManager requestImageDataAndOrientationForAsset:asset
-                                                      options:options
-                                                resultHandler:^(NSData * _Nullable imageData, NSString * _Nullable dataUTI, CGImagePropertyOrientation orientation, NSDictionary * _Nullable info) {
-        if (imageData.length == 0) {
+    CGSize targetSize = [self analysisTargetSize];
+    [self.imageManager requestImageForAsset:asset
+                                 targetSize:targetSize
+                                contentMode:PHImageContentModeAspectFit
+                                    options:options
+                              resultHandler:^(UIImage * _Nullable result, NSDictionary * _Nullable info) {
+        if ([info[PHImageCancelledKey] boolValue]) {
             completion(nil);
             return;
         }
 
-        UIImage *image = [UIImage imageWithData:imageData];
-        NSData *compressedData = [self compressedJPEGDataFromImage:image maxPixel:1280];
-        completion(compressedData ?: imageData);
+        if ([info[PHImageResultIsDegradedKey] boolValue]) {
+            return;
+        }
+
+        if (result == nil) {
+            completion(nil);
+            return;
+        }
+
+        @autoreleasepool {
+            NSData *compressedData = [self compressedJPEGDataFromImage:result maxPixel:1280];
+            completion(compressedData);
+        }
     }];
+}
+
+/**
+ * @brief 返回分析阶段请求的目标图片尺寸，避免先加载原始大图再压缩。
+ * @return 目标像素尺寸。
+ */
+- (CGSize)analysisTargetSize {
+    return CGSizeMake(1280, 1280);
 }
 
 /**

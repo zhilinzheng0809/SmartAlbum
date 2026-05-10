@@ -44,6 +44,7 @@
         NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
         configuration.timeoutIntervalForRequest = 120;
         configuration.timeoutIntervalForResource = 180;
+        configuration.HTTPMaximumConnectionsPerHost = 10;
         _session = [NSURLSession sessionWithConfiguration:configuration];
     }
     return self;
@@ -183,12 +184,14 @@
     }];
 
     for (SAQwenAnalyzeItem *item in items) {
-        [userContent addObject:@{
-            @"type": @"image_url",
-            @"image_url": @{
-                @"url": [self dataURLStringForImageData:item.imageData]
-            }
-        }];
+        @autoreleasepool {
+            [userContent addObject:@{
+                @"type": @"image_url",
+                @"image_url": @{
+                    @"url": [self dataURLStringForImageData:item.imageData]
+                }
+            }];
+        }
     }
 
     return @{

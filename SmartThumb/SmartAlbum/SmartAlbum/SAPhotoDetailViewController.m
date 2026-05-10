@@ -295,20 +295,41 @@
     PHImageRequestOptions *options = [[PHImageRequestOptions alloc] init];
     options.networkAccessAllowed = YES;
     options.deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
+    options.resizeMode = PHImageRequestOptionsResizeModeExact;
     options.version = PHImageRequestOptionsVersionCurrent;
 
-    [self.imageManager requestImageDataAndOrientationForAsset:self.asset
-                                                      options:options
-                                                resultHandler:^(NSData * _Nullable imageData, NSString * _Nullable dataUTI, CGImagePropertyOrientation orientation, NSDictionary * _Nullable info) {
-        if (imageData.length == 0) {
+    [self.imageManager requestImageForAsset:self.asset
+                                 targetSize:[self analysisTargetSize]
+                                contentMode:PHImageContentModeAspectFit
+                                    options:options
+                              resultHandler:^(UIImage * _Nullable result, NSDictionary * _Nullable info) {
+        if ([info[PHImageCancelledKey] boolValue]) {
             completion(nil);
             return;
         }
 
-        UIImage *image = [UIImage imageWithData:imageData];
-        NSData *compressedData = [self compressedJPEGDataFromImage:image maxPixel:1280];
-        completion(compressedData ?: imageData);
+        if ([info[PHImageResultIsDegradedKey] boolValue]) {
+            return;
+        }
+
+        if (result == nil) {
+            completion(nil);
+            return;
+        }
+
+        @autoreleasepool {
+            NSData *compressedData = [self compressedJPEGDataFromImage:result maxPixel:1280];
+            completion(compressedData);
+        }
     }];
+}
+
+/**
+ * @brief 返回分析阶段请求的目标图片尺寸，避免先加载原始大图再压缩。
+ * @return 目标像素尺寸。
+ */
+- (CGSize)analysisTargetSize {
+    return CGSizeMake(1280, 1280);
 }
 
 /**
