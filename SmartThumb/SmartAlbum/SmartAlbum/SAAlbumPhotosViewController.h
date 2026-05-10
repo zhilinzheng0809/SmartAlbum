@@ -3,7 +3,7 @@
 @class PHAssetCollection;
 @class PHCachingImageManager;
 @class SATagStore;
-@class SAQwenVLService;
+@class SAVisionLLMService;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -14,14 +14,14 @@ NS_ASSUME_NONNULL_BEGIN
  * @param albumCollection 当前相册集合。
  * @param imageManager 图片读取管理器。
  * @param tagStore 标签存储对象。
- * @param qwenService 大模型分析服务。
+ * @param visionService 大模型分析服务。
  * @param completion 相册数据变更后的回调。
  * @return 相册照片页控制器。
  */
 - (instancetype)initWithAlbumCollection:(PHAssetCollection *)albumCollection
                            imageManager:(PHCachingImageManager *)imageManager
                                tagStore:(SATagStore *)tagStore
-                            qwenService:(SAQwenVLService *)qwenService
+                            visionService:(SAVisionLLMService *)visionService
                              completion:(void (^ _Nullable)(void))completion;
 
 @end

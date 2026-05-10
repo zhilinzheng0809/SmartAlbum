@@ -1,7 +1,7 @@
 #import "SAPhotoDetailViewController.h"
 #import "SAFullscreenPhotoViewController.h"
 #import "SAPhotoClassification.h"
-#import "SAQwenVLService.h"
+#import "SAVisionLLMService.h"
 #import "SATagStore.h"
 #import <Photos/Photos.h>
 
@@ -10,7 +10,7 @@
 @property (nonatomic, strong) PHAsset *asset;
 @property (nonatomic, strong) PHCachingImageManager *imageManager;
 @property (nonatomic, strong) SATagStore *tagStore;
-@property (nonatomic, strong) SAQwenVLService *qwenService;
+@property (nonatomic, strong) SAVisionLLMService *visionService;
 @property (nonatomic, copy, nullable) void (^completionHandler)(void);
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIStackView *contentStack;
@@ -33,21 +33,21 @@
  * @param asset 当前展示的相册资源。
  * @param imageManager 缩略图与原图读取管理器。
  * @param tagStore 标签存储对象。
- * @param qwenService 大模型分析服务。
+ * @param visionService 大模型分析服务。
  * @param completion 分析完成后的回调。
  * @return 详情页控制器。
  */
 - (instancetype)initWithAsset:(PHAsset *)asset
                  imageManager:(PHCachingImageManager *)imageManager
                      tagStore:(SATagStore *)tagStore
-                  qwenService:(SAQwenVLService *)qwenService
+                visionService:(SAVisionLLMService *)visionService
                    completion:(void (^)(void))completion {
     self = [super initWithNibName:nil bundle:nil];
     if (self) {
         _asset = asset;
         _imageManager = imageManager;
         _tagStore = tagStore;
-        _qwenService = qwenService;
+        _visionService = visionService;
         _completionHandler = [completion copy];
     }
     return self;
@@ -207,7 +207,9 @@
     } else {
         self.summaryLabel.text = @"尚未分析这张照片。";
         self.tagsLabel.text = @"暂无标签";
-        self.statusLabel.text = @"点击下方按钮后将调用 qwen-vl-max 生成摘要和标签。";
+        self.statusLabel.text = [NSString stringWithFormat:@"点击下方按钮后将调用 %@（%@）生成摘要和标签。",
+                                 [self.visionService providerDisplayName],
+                                 [self.visionService providerModelName]];
         [self.analyzeButton setTitle:@"开始分析这张照片" forState:UIControlStateNormal];
     }
 }
@@ -220,12 +222,19 @@
         return;
     }
 
-    if (![self.qwenService isConfigured]) {
-        [self showAlertWithTitle:@"未配置 Qwen" message:[self.qwenService configurationMessage]];
+    if (![self.visionService isConfigured]) {
+        [self showAlertWithTitle:@"未配置分析模型" message:[self.visionService configurationMessage]];
         return;
     }
 
-    NSString *message = @"将调用 qwen-vl-max 分析当前照片并生成摘要与标签，可能产生接口费用。是否继续？";
+    if (![self.visionService supportsPhotoAnalysis]) {
+        [self showAlertWithTitle:@"当前模型暂不支持照片分析" message:[self.visionService photoAnalysisAvailabilityMessage]];
+        return;
+    }
+
+    NSString *message = [NSString stringWithFormat:@"将调用 %@（%@）分析当前照片并生成摘要与标签，可能产生接口费用。是否继续？",
+                         [self.visionService providerDisplayName],
+                         [self.visionService providerModelName]];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"开始分析" message:message preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"继续" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
@@ -255,7 +264,7 @@
             return;
         }
 
-        [strongSelf.qwenService analyzeImageData:imageData localIdentifier:strongSelf.asset.localIdentifier completion:^(SAPhotoClassification * _Nullable classification, NSError * _Nullable error) {
+        [strongSelf.visionService analyzeImageData:imageData localIdentifier:strongSelf.asset.localIdentifier completion:^(SAPhotoClassification * _Nullable classification, NSError * _Nullable error) {
             if (classification != nil) {
                 [strongSelf.tagStore saveClassification:classification];
                 [strongSelf finishAnalysisWithClassification:classification errorMessage:nil];

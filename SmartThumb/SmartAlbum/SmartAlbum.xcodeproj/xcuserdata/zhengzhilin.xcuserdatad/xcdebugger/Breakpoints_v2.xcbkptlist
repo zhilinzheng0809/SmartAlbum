@@ -36,5 +36,97 @@
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "F189C8E6-E71A-4888-A318-0AC4BF34CAF1"
+            shouldBeEnabled = "Yes"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "SmartAlbum/SAVisionLLMService.m"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "204"
+            endingLineNumber = "204"
+            landmarkName = "-analyzeBatchItems:completion:"
+            landmarkType = "7">
+            <Locations>
+               <Location
+                  uuid = "F189C8E6-E71A-4888-A318-0AC4BF34CAF1 - 22fee8da4b2023f"
+                  shouldBeEnabled = "Yes"
+                  ignoreCount = "0"
+                  continueAfterRunningActions = "No"
+                  symbolName = "__51-[SAVisionLLMService analyzeBatchItems:completion:]_block_invoke_2"
+                  moduleName = "SmartAlbum"
+                  usesParentBreakpointCondition = "Yes"
+                  urlString = "file:///Users/zhengzhilin/Work/Private/Github/iOS/SmartAlbum/SmartThumb/SmartAlbum/SmartAlbum/SAVisionLLMService.m"
+                  startingColumnNumber = "9223372036854775807"
+                  endingColumnNumber = "9223372036854775807"
+                  startingLineNumber = "204"
+                  endingLineNumber = "204">
+               </Location>
+               <Location
+                  uuid = "F189C8E6-E71A-4888-A318-0AC4BF34CAF1 - 97f8a94826674962"
+                  shouldBeEnabled = "Yes"
+                  ignoreCount = "0"
+                  continueAfterRunningActions = "No"
+                  symbolName = "-[SAVisionLLMService analyzeBatchItems:completion:]"
+                  moduleName = "SmartAlbum"
+                  usesParentBreakpointCondition = "Yes"
+                  urlString = "file:///Users/zhengzhilin/Work/Private/Github/iOS/SmartAlbum/SmartThumb/SmartAlbum/SmartAlbum/SAVisionLLMService.m"
+                  startingColumnNumber = "9223372036854775807"
+                  endingColumnNumber = "9223372036854775807"
+                  startingLineNumber = "204"
+                  endingLineNumber = "204">
+               </Location>
+            </Locations>
+         </BreakpointContent>
+      </BreakpointProxy>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "16CE233B-8F18-416B-B860-D2A25721CCB2"
+            shouldBeEnabled = "Yes"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "SmartAlbum/SAVisionLLMService.m"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "216"
+            endingLineNumber = "216"
+            landmarkName = "-analyzeBatchItems:completion:"
+            landmarkType = "7">
+            <Locations>
+               <Location
+                  uuid = "16CE233B-8F18-416B-B860-D2A25721CCB2 - 2d8c9b0ab5998dc8"
+                  shouldBeEnabled = "Yes"
+                  ignoreCount = "0"
+                  continueAfterRunningActions = "No"
+                  symbolName = "__51-[SAVisionLLMService analyzeBatchItems:completion:]_block_invoke.92"
+                  moduleName = "SmartAlbum"
+                  usesParentBreakpointCondition = "Yes"
+                  urlString = "file:///Users/zhengzhilin/Work/Private/Github/iOS/SmartAlbum/SmartThumb/SmartAlbum/SmartAlbum/SAVisionLLMService.m"
+                  startingColumnNumber = "9223372036854775807"
+                  endingColumnNumber = "9223372036854775807"
+                  startingLineNumber = "216"
+                  endingLineNumber = "216">
+               </Location>
+               <Location
+                  uuid = "16CE233B-8F18-416B-B860-D2A25721CCB2 - 97f8a94826674bee"
+                  shouldBeEnabled = "Yes"
+                  ignoreCount = "0"
+                  continueAfterRunningActions = "No"
+                  symbolName = "-[SAVisionLLMService analyzeBatchItems:completion:]"
+                  moduleName = "SmartAlbum"
+                  usesParentBreakpointCondition = "Yes"
+                  urlString = "file:///Users/zhengzhilin/Work/Private/Github/iOS/SmartAlbum/SmartThumb/SmartAlbum/SmartAlbum/SAVisionLLMService.m"
+                  startingColumnNumber = "9223372036854775807"
+                  endingColumnNumber = "9223372036854775807"
+                  startingLineNumber = "216"
+                  endingLineNumber = "216">
+               </Location>
+            </Locations>
+         </BreakpointContent>
+      </BreakpointProxy>
    </Breakpoints>
 </Bucket>

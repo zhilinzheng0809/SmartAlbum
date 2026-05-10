@@ -13,7 +13,7 @@
 #import "SAPhotoClassification.h"
 #import "SAPhotoDetailViewController.h"
 #import "SAPhotoGridCell.h"
-#import "SAQwenVLService.h"
+#import "SAVisionLLMService.h"
 #import "SASpeechRecognizerService.h"
 #import "SATagStore.h"
 #import <Photos/Photos.h>
@@ -33,7 +33,7 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
 @property (nonatomic, strong) UISearchController *searchController;
 @property (nonatomic, strong) PHCachingImageManager *imageManager;
 @property (nonatomic, strong) SATagStore *tagStore;
-@property (nonatomic, strong) SAQwenVLService *qwenService;
+@property (nonatomic, strong) SAVisionLLMService *visionService;
 @property (nonatomic, strong) SASpeechRecognizerService *speechService;
 @property (nonatomic, strong) NSArray<SAAlbumItem *> *allAlbums;
 @property (nonatomic, strong) NSArray<SAAlbumItem *> *filteredAlbums;
@@ -55,7 +55,7 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     self.imageManager = [[PHCachingImageManager alloc] init];
     self.tagStore = [[SATagStore alloc] init];
-    self.qwenService = [[SAQwenVLService alloc] init];
+    self.visionService = [[SAVisionLLMService alloc] init];
     self.speechService = [[SASpeechRecognizerService alloc] initWithLocaleIdentifier:@"zh-CN"];
     self.allAlbums = @[];
     self.filteredAlbums = @[];
@@ -104,6 +104,10 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
  */
 - (void)setupNavigationBar {
     self.title = @"智能相册";
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"模型"
+                                                                             style:UIBarButtonItemStylePlain
+                                                                            target:self
+                                                                            action:@selector(modelButtonTapped)];
 
     self.searchController = [[UISearchController alloc] initWithSearchResultsController:nil];
     self.searchController.obscuresBackgroundDuringPresentation = NO;
@@ -118,6 +122,7 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
     self.definesPresentationContext = YES;
     [self updateSpeechSearchButtonAppearance];
+    [self updateModelSelectionButton];
 }
 
 /**
@@ -371,7 +376,7 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
 - (void)configureAutoAnalysisManager {
     [[SAAutoAnalysisManager sharedManager] configureWithImageManager:self.imageManager
                                                            tagStore:self.tagStore
-                                                        qwenService:self.qwenService];
+                                                      visionService:self.visionService];
 }
 
 /**
@@ -384,8 +389,11 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
     }
 
     self.hasPresentedAutoAnalysisPrompt = YES;
+    NSString *message = [NSString stringWithFormat:@"是否现在开始对相册中的照片进行后台自动分析？分析会在后台批量进行，不影响你继续浏览、搜索和管理照片，后续新增照片也会自动分析。该过程会调用 %@（%@），可能产生接口费用。",
+                         [self.visionService providerDisplayName],
+                         [self.visionService providerModelName]];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"开启自动分析"
-                                                                   message:@"是否现在开始对相册中的照片进行后台自动分析？分析会串行进行，不影响你继续浏览、搜索和管理照片，后续新增照片也会自动分析。该过程会调用 qwen-vl-max，可能产生接口费用。"
+                                                                   message:message
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"暂不启用" style:UIAlertActionStyleCancel handler:^(UIAlertAction * _Nonnull action) {
         [[SAAutoAnalysisManager sharedManager] markAutoAnalysisPromptHandled];
@@ -416,6 +424,60 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
         [self loadAlbums];
     }
     self.autoAnalysisWasRunning = isRunningNumber.boolValue;
+}
+
+/**
+ * @brief 点击首页导航栏模型按钮后展示可切换的模型列表。
+ */
+- (void)modelButtonTapped {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"选择分析模型"
+                                                                   message:@"你可以在阿里云百炼 Qwen 和 DeepSeek V4 之间切换，新的分析任务会使用当前所选模型。"
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"阿里云百炼 Qwen" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        [weakSelf switchVisionProvider:SAVisionProviderTypeQwen];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"DeepSeek V4" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        [weakSelf switchVisionProvider:SAVisionProviderTypeDeepSeek];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+
+    UIPopoverPresentationController *popover = alert.popoverPresentationController;
+    if (popover != nil) {
+        popover.barButtonItem = self.navigationItem.leftBarButtonItem;
+    }
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+/**
+ * @brief 切换当前视觉分析模型并刷新首页展示文案。
+ * @param providerType 目标模型类型。
+ */
+- (void)switchVisionProvider:(SAVisionProviderType)providerType {
+    [self.visionService switchProviderType:providerType];
+    [self updateModelSelectionButton];
+    [self configureAutoAnalysisManager];
+    [self syncAutoAnalysisProgressUI];
+
+    NSString *status = [NSString stringWithFormat:@"当前分析模型已切换为 %@（%@）。",
+                        [self.visionService providerDisplayName],
+                        [self.visionService providerModelName]];
+    self.statusLabel.text = status;
+    if (![self.visionService isConfigured]) {
+        [self showAlertWithTitle:@"模型尚未配置" message:[self.visionService configurationMessage]];
+        return;
+    }
+    if (![self.visionService supportsPhotoAnalysis]) {
+        [self showAlertWithTitle:@"当前模型暂不可用" message:[self.visionService photoAnalysisAvailabilityMessage]];
+    }
+}
+
+/**
+ * @brief 刷新首页模型切换按钮标题。
+ */
+- (void)updateModelSelectionButton {
+    self.navigationItem.leftBarButtonItem.title = [self.visionService providerShortTitle];
 }
 
 /**
@@ -532,7 +594,7 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
     SAAlbumPhotosViewController *photosViewController = [[SAAlbumPhotosViewController alloc] initWithAlbumCollection:item.collection
                                                                                                           imageManager:self.imageManager
                                                                                                               tagStore:self.tagStore
-                                                                                                           qwenService:self.qwenService
+                                                                                                           visionService:self.visionService
                                                                                                             completion:^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (strongSelf == nil) {
@@ -609,7 +671,7 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
     SAPhotoDetailViewController *detailViewController = [[SAPhotoDetailViewController alloc] initWithAsset:asset
                                                                                                imageManager:self.imageManager
                                                                                                    tagStore:self.tagStore
-                                                                                                qwenService:self.qwenService
+                                                                                                visionService:self.visionService
                                                                                                  completion:^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (strongSelf == nil) {

@@ -1,6 +1,6 @@
 #import "SAAutoAnalysisManager.h"
 #import "SAPhotoClassification.h"
-#import "SAQwenVLService.h"
+#import "SAVisionLLMService.h"
 #import "SATagStore.h"
 #import <UIKit/UIKit.h>
 
@@ -25,7 +25,7 @@ static CGFloat const SAAutoAnalysisJPEGQuality = 0.68;
 
 @property (nonatomic, strong) PHCachingImageManager *imageManager;
 @property (nonatomic, strong) SATagStore *tagStore;
-@property (nonatomic, strong) SAQwenVLService *qwenService;
+@property (nonatomic, strong) SAVisionLLMService *visionService;
 @property (nonatomic, strong) PHFetchResult<PHAsset *> *allImageAssetsFetchResult;
 @property (nonatomic, strong) NSMutableOrderedSet<NSString *> *pendingAssetIdentifiers;
 @property (nonatomic, strong) NSMutableOrderedSet<NSString *> *processingAssetIdentifiers;
@@ -89,14 +89,14 @@ static CGFloat const SAAutoAnalysisJPEGQuality = 0.68;
  * @brief 注入自动分析所需依赖，并准备监听图库变化。
  * @param imageManager 图片读取管理器。
  * @param tagStore 标签存储对象。
- * @param qwenService 大模型分析服务。
+ * @param visionService 大模型分析服务。
  */
 - (void)configureWithImageManager:(PHCachingImageManager *)imageManager
                          tagStore:(SATagStore *)tagStore
-                      qwenService:(SAQwenVLService *)qwenService {
+                    visionService:(SAVisionLLMService *)visionService {
     self.imageManager = imageManager;
     self.tagStore = tagStore;
-    self.qwenService = qwenService;
+    self.visionService = visionService;
     [self refreshAllImageAssetsFetchResult];
     [self registerPhotoLibraryObserverIfNeeded];
 
@@ -118,7 +118,7 @@ static CGFloat const SAAutoAnalysisJPEGQuality = 0.68;
         return NO;
     }
 
-    if (self.tagStore == nil || self.qwenService == nil || ![self.qwenService isConfigured]) {
+    if (self.tagStore == nil || self.visionService == nil || ![self.visionService isConfigured]) {
         return NO;
     }
 
@@ -315,8 +315,9 @@ static CGFloat const SAAutoAnalysisJPEGQuality = 0.68;
         return;
     }
 
-    if (self.imageManager == nil || self.tagStore == nil || self.qwenService == nil || ![self.qwenService isConfigured]) {
-        self.statusText = @"自动分析未启动，请先完成 Qwen 配置。";
+    if (self.imageManager == nil || self.tagStore == nil || self.visionService == nil || ![self.visionService isConfigured]) {
+        self.statusText = [NSString stringWithFormat:@"自动分析未启动，请先完成 %@ 配置。",
+                           [self.visionService providerDisplayName]];
         [self refreshRunningState];
         [self notifyProgressChanged];
         return;
@@ -341,7 +342,7 @@ static CGFloat const SAAutoAnalysisJPEGQuality = 0.68;
         [self notifyProgressChanged];
 
         __weak typeof(self) weakSelf = self;
-        [self requestOptimizedAnalyzeItemsForAssets:batchAssets completion:^(NSArray<SAQwenAnalyzeItem *> * _Nonnull items, NSArray<NSString *> * _Nonnull failedReadIdentifiers) {
+        [self requestOptimizedAnalyzeItemsForAssets:batchAssets completion:^(NSArray<SAVisionAnalyzeItem *> * _Nonnull items, NSArray<NSString *> * _Nonnull failedReadIdentifiers) {
             __strong typeof(weakSelf) strongSelf = weakSelf;
             if (strongSelf == nil) {
                 return;
@@ -411,8 +412,8 @@ static CGFloat const SAAutoAnalysisJPEGQuality = 0.68;
  * @param completion 请求项及读取失败标识回调。
  */
 - (void)requestOptimizedAnalyzeItemsForAssets:(NSArray<PHAsset *> *)assets
-                                   completion:(void (^)(NSArray<SAQwenAnalyzeItem *> *items, NSArray<NSString *> *failedReadIdentifiers))completion {
-    NSMutableArray<SAQwenAnalyzeItem *> *preparedItems = [NSMutableArray array];
+                                   completion:(void (^)(NSArray<SAVisionAnalyzeItem *> *items, NSArray<NSString *> *failedReadIdentifiers))completion {
+    NSMutableArray<SAVisionAnalyzeItem *> *preparedItems = [NSMutableArray array];
     NSMutableArray<NSString *> *failedIdentifiers = [NSMutableArray array];
     [self requestOptimizedAnalyzeItemsForAssets:assets
                                           index:0
@@ -431,9 +432,9 @@ static CGFloat const SAAutoAnalysisJPEGQuality = 0.68;
  */
 - (void)requestOptimizedAnalyzeItemsForAssets:(NSArray<PHAsset *> *)assets
                                         index:(NSInteger)index
-                                preparedItems:(NSMutableArray<SAQwenAnalyzeItem *> *)preparedItems
+                                preparedItems:(NSMutableArray<SAVisionAnalyzeItem *> *)preparedItems
                             failedIdentifiers:(NSMutableArray<NSString *> *)failedIdentifiers
-                                   completion:(void (^)(NSArray<SAQwenAnalyzeItem *> *items, NSArray<NSString *> *failedReadIdentifiers))completion {
+                                   completion:(void (^)(NSArray<SAVisionAnalyzeItem *> *items, NSArray<NSString *> *failedReadIdentifiers))completion {
     if (index >= (NSInteger)assets.count) {
         dispatch_async(dispatch_get_main_queue(), ^{
             completion(preparedItems.copy, failedIdentifiers.copy);
@@ -451,7 +452,7 @@ static CGFloat const SAAutoAnalysisJPEGQuality = 0.68;
 
         @autoreleasepool {
             if (imageData.length > 0) {
-                SAQwenAnalyzeItem *item = [[SAQwenAnalyzeItem alloc] initWithImageData:imageData localIdentifier:asset.localIdentifier];
+                SAVisionAnalyzeItem *item = [[SAVisionAnalyzeItem alloc] initWithImageData:imageData localIdentifier:asset.localIdentifier];
                 [preparedItems addObject:item];
             } else {
                 [failedIdentifiers addObject:asset.localIdentifier ?: @""];
@@ -471,7 +472,7 @@ static CGFloat const SAAutoAnalysisJPEGQuality = 0.68;
  * @param items 已准备好的请求项数组。
  * @param failedReadIdentifiers 图片读取失败的资源标识数组。
  */
-- (void)handlePreparedBatchItems:(NSArray<SAQwenAnalyzeItem *> *)items
+- (void)handlePreparedBatchItems:(NSArray<SAVisionAnalyzeItem *> *)items
            failedReadIdentifiers:(NSArray<NSString *> *)failedReadIdentifiers {
     if (failedReadIdentifiers.count > 0) {
         [self.processingAssetIdentifiers removeObjectsInArray:failedReadIdentifiers];
@@ -489,7 +490,7 @@ static CGFloat const SAAutoAnalysisJPEGQuality = 0.68;
     }
 
     __weak typeof(self) weakSelf = self;
-    [self.qwenService analyzeBatchItems:items completion:^(NSDictionary<NSString *,SAPhotoClassification *> * _Nonnull classifications, NSArray<NSString *> * _Nonnull failedIdentifiers, NSError * _Nullable error) {
+    [self.visionService analyzeBatchItems:items completion:^(NSDictionary<NSString *,SAPhotoClassification *> * _Nonnull classifications, NSArray<NSString *> * _Nonnull failedIdentifiers, NSError * _Nullable error) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (strongSelf == nil) {
             return;
@@ -517,7 +518,7 @@ static CGFloat const SAAutoAnalysisJPEGQuality = 0.68;
  * @param items 待降级的请求项数组。
  * @param completion 完成回调。
  */
-- (void)analyzeItemsIndividually:(NSArray<SAQwenAnalyzeItem *> *)items
+- (void)analyzeItemsIndividually:(NSArray<SAVisionAnalyzeItem *> *)items
                       completion:(void (^)(NSDictionary<NSString *, SAPhotoClassification *> *classifications, NSArray<NSString *> *failedIdentifiers))completion {
     if (items.count == 0) {
         completion(@{}, @[]);
@@ -528,9 +529,9 @@ static CGFloat const SAAutoAnalysisJPEGQuality = 0.68;
     NSMutableArray<NSString *> *failedIdentifiers = [NSMutableArray array];
     dispatch_group_t group = dispatch_group_create();
 
-    for (SAQwenAnalyzeItem *item in items) {
+    for (SAVisionAnalyzeItem *item in items) {
         dispatch_group_enter(group);
-        [self.qwenService analyzeImageData:item.imageData localIdentifier:item.localIdentifier completion:^(SAPhotoClassification * _Nullable classification, NSError * _Nullable error) {
+        [self.visionService analyzeImageData:item.imageData localIdentifier:item.localIdentifier completion:^(SAPhotoClassification * _Nullable classification, NSError * _Nullable error) {
             if (classification != nil) {
                 classifications[item.localIdentifier] = classification;
             } else {
@@ -552,12 +553,12 @@ static CGFloat const SAAutoAnalysisJPEGQuality = 0.68;
  * @param failedIdentifiers 失败资源标识数组。
  * @param error 错误对象。
  */
-- (void)finishBatchItems:(NSArray<SAQwenAnalyzeItem *> *)items
+- (void)finishBatchItems:(NSArray<SAVisionAnalyzeItem *> *)items
           classifications:(NSDictionary<NSString *, SAPhotoClassification *> *)classifications
        failedIdentifiers:(NSArray<NSString *> *)failedIdentifiers
                    error:(NSError * _Nullable)error {
     NSMutableArray<NSString *> *processedIdentifiers = [NSMutableArray array];
-    for (SAQwenAnalyzeItem *item in items) {
+    for (SAVisionAnalyzeItem *item in items) {
         [processedIdentifiers addObject:item.localIdentifier];
         SAPhotoClassification *classification = classifications[item.localIdentifier];
         if (classification != nil) {

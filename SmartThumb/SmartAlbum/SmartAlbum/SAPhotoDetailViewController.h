@@ -3,7 +3,7 @@
 @class PHAsset;
 @class PHCachingImageManager;
 @class SATagStore;
-@class SAQwenVLService;
+@class SAVisionLLMService;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -14,14 +14,14 @@ NS_ASSUME_NONNULL_BEGIN
  * @param asset 当前展示的相册资源。
  * @param imageManager 缩略图与原图读取管理器。
  * @param tagStore 标签存储对象。
- * @param qwenService 大模型分析服务。
+ * @param visionService 大模型分析服务。
  * @param completion 分析完成后的回调。
  * @return 详情页控制器。
  */
 - (instancetype)initWithAsset:(PHAsset *)asset
                  imageManager:(PHCachingImageManager *)imageManager
                      tagStore:(SATagStore *)tagStore
-                  qwenService:(SAQwenVLService *)qwenService
+                  visionService:(SAVisionLLMService *)visionService
                    completion:(void (^ _Nullable)(void))completion;
 
 @end

@@ -5,7 +5,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @class PHCachingImageManager;
 @class SATagStore;
-@class SAQwenVLService;
+@class SAVisionLLMService;
 
 extern NSString * const SAAutoAnalysisProgressDidChangeNotification;
 extern NSString * const SAAutoAnalysisIsRunningKey;
@@ -32,11 +32,11 @@ extern NSString * const SAAutoAnalysisStatusTextKey;
  * @brief 注入自动分析所需依赖，并准备监听图库变化。
  * @param imageManager 图片读取管理器。
  * @param tagStore 标签存储对象。
- * @param qwenService 大模型分析服务。
+ * @param visionService 大模型分析服务。
  */
 - (void)configureWithImageManager:(PHCachingImageManager *)imageManager
                          tagStore:(SATagStore *)tagStore
-                      qwenService:(SAQwenVLService *)qwenService;
+                      visionService:(SAVisionLLMService *)visionService;
 
 /**
  * @brief 判断当前是否应该展示首次自动分析提醒。
