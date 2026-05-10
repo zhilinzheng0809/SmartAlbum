@@ -28,10 +28,21 @@ final class PhotoGridViewModel: ObservableObject {
 
     private let photoService: PhotoLibraryService
     private let photoStore: PhotoStore
+    private var cancellables = Set<AnyCancellable>()
 
     init(photoService: PhotoLibraryService, photoStore: PhotoStore) {
         self.photoService = photoService
         self.photoStore = photoStore
+
+        // 监听授权状态变化，权限通过后自动加载照片
+        photoService.$authorizationStatus
+            .sink { [weak self] status in
+                guard let self else { return }
+                if status == .authorized || status == .limited {
+                    Task { await self.loadPhotos() }
+                }
+            }
+            .store(in: &cancellables)
     }
 
     func loadPhotos(searchText: String = "") async {
