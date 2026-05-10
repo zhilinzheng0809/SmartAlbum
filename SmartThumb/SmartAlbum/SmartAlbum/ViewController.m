@@ -722,9 +722,14 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
             return;
         }
 
+        NSString *trimmedText = [recognizedText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmedText.length == 0) {
+            return;
+        }
+
         strongSelf.searchController.active = YES;
-        strongSelf.searchController.searchBar.text = recognizedText;
-        strongSelf.searchKeyword = recognizedText;
+        strongSelf.searchController.searchBar.text = trimmedText;
+        strongSelf.searchKeyword = trimmedText;
         [strongSelf applyFilter];
     } stateHandler:^(BOOL isRecognizing) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
@@ -732,10 +737,13 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
             return;
         }
 
+        strongSelf.searchController.active = YES;
         [strongSelf updateSpeechSearchButtonAppearance];
         if (isRecognizing) {
+            [strongSelf updateSpeechRecognitionPrompt:@"正在识别中..."];
             strongSelf.statusLabel.text = @"正在语音识别，请直接说出搜索内容。";
         } else if (strongSelf.searchController.isActive) {
+            [strongSelf updateSpeechRecognitionPrompt:nil];
             strongSelf.statusLabel.text = @"已停止语音识别，可继续编辑搜索内容。";
         }
     } errorHandler:^(NSString *message) {
@@ -744,6 +752,7 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
             return;
         }
 
+        [strongSelf updateSpeechRecognitionPrompt:nil];
         [strongSelf updateSpeechSearchButtonAppearance];
         [strongSelf showAlertWithTitle:@"语音搜索不可用" message:message];
     }];
@@ -755,6 +764,7 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
  */
 - (void)searchBarCancelButtonClicked:(UISearchBar *)searchBar {
     [self.speechService stopRecognition];
+    [self updateSpeechRecognitionPrompt:nil];
     [self updateSpeechSearchButtonAppearance];
     self.searchKeyword = @"";
     searchBar.text = @"";
@@ -769,6 +779,14 @@ static NSString * const SAHomeSearchPhotoCellIdentifier = @"SAHomeSearchPhotoCel
     [self.searchController.searchBar setImage:[UIImage systemImageNamed:iconName]
                             forSearchBarIcon:UISearchBarIconBookmark
                                        state:UIControlStateNormal];
+}
+
+/**
+ * @brief 更新搜索框顶部的语音识别提示文案。
+ * @param prompt 提示文案，传空则清除。
+ */
+- (void)updateSpeechRecognitionPrompt:(NSString * _Nullable)prompt {
+    self.searchController.searchBar.prompt = prompt;
 }
 
 /**
